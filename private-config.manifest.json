@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "files": [
+    {
+      "source": "flashfox-smart-proxy-offline.yaml",
+      "scope": "app",
+      "name": "flashfox-smart-proxy-offline.yaml"
+    },
+    {
+      "source": "smart-proxy-data/settings.json",
+      "scope": "data",
+      "name": "settings.json"
+    },
+    {
+      "source": "smart-proxy-data/runtime/main.json",
+      "scope": "runtime",
+      "name": "main.json"
+    },
+    {
+      "source": "smart-proxy-data/runtime/dns-test.json",
+      "scope": "runtime",
+      "name": "dns-test.json"
+    },
+    {
+      "source": "smart-proxy-data/runtime/subscription.yaml",
+      "scope": "runtime",
+      "name": "subscription.yaml"
+    },
+    {
+      "source": "smart-proxy-data/runtime/subscription.yaml.source-url.txt",
+      "scope": "runtime",
+      "name": "subscription.yaml.source-url.txt"
+    },
+    {
+      "source": "smart-proxy-data/runtime/subscription.sub-mseluarn-ftd5i.yaml",
+      "scope": "runtime",
+      "name": "subscription.sub-mseluarn-ftd5i.yaml"
+    },
+    {
+      "source": "smart-proxy-data/runtime/subscription.sub-mseluarn-ftd5i.yaml.source-url.txt",
+      "scope": "runtime",
+      "name": "subscription.sub-mseluarn-ftd5i.yaml.source-url.txt"
+    }
+  ]
+}

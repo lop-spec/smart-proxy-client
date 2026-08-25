@@ -1,0 +1,27 @@
+# Dependencies and generated build outputs
+node_modules/
+bin/
+dist/
+resources/private-config/
+
+# Local executables are restored by the reproducible build script.
+*.exe
+resources/fonts/*.otf
+
+# Editor/runtime debris and local snapshots
+backups/
+*.bak-*
+*.log
+.tmp/
+neutralinojs.log
+
+# Keep the personal configuration snapshot, but never commit volatile runtime
+# output, WebView profiles, locks, probe payloads, or logs.
+smart-proxy-data/**
+!smart-proxy-data/settings.json
+!smart-proxy-data/runtime/
+smart-proxy-data/runtime/**
+!smart-proxy-data/runtime/main.json
+!smart-proxy-data/runtime/dns-test.json
+!smart-proxy-data/runtime/subscription*.yaml
+!smart-proxy-data/runtime/subscription*.yaml.source-url.txt

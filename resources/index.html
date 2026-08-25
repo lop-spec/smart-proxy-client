@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Proxy Client</title>
+    <link rel="icon" href="/icons/appIcon.png">
+    <link rel="stylesheet" href="/styles.css?v=2026-08-05-jitter-groups-b">
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">
+            <div class="mark">SP</div>
+            <span id="coreUpdateHint" class="core-update-hint" title=""></span>
+          </div>
+          <div class="brand-copy">
+            <strong>Smart Proxy</strong>
+            <span>v35 · CF Upload</span>
+          </div>
+        </div>
+
+        <nav class="nav-list">
+          <button class="nav active" data-view="home"><span class="nav-icon">⌂</span><span>首页</span></button>
+          <button class="nav" data-view="proxy-nodes"><span class="nav-icon">◎</span><span>节点</span></button>
+          <button class="nav" data-view="connections"><span class="nav-icon">⇄</span><span>连接</span></button>
+          <button class="nav" data-view="logs"><span class="nav-icon">≣</span><span>日志</span></button>
+          <button class="nav" data-view="settings"><span class="nav-icon">⚙</span><span>设置</span></button>
+        </nav>
+
+        <div class="side-status">
+          <span id="sideDot" class="dot"></span>
+          <span id="sideStatus">未启动</span>
+        </div>
+      </aside>
+
+      <main class="content">
+        <section id="view-home" class="view active">
+          <div id="hero" class="hero off">
+            <div class="hero-copy">
+              <span class="eyebrow">当前状态</span>
+              <h1 id="heroTitle">代理未启动</h1>
+              <p id="heroMeta">选择配置后启动主核心</p>
+            </div>
+            <button id="toggleCoreBtn" class="primary">启动代理</button>
+          </div>
+
+          <div class="dashboard-grid">
+            <section class="panel">
+              <div class="panel-head">
+                <h2>当前节点</h2>
+                <span id="homeCore" class="panel-badge">sing-box</span>
+              </div>
+              <div class="kv">
+                <span>目标组</span><b id="homeGroup">-</b>
+                <span>所在组</span><b id="homeNodeGroup" title="当前节点所属分组；抖动熔断按组号 A→B→C→D 顺序挑选逃生目标组">-</b>
+                <span>当前节点</span><b id="homeNode">-</b>
+                <span>运行模式</span><b id="homeMode">手动选点</b>
+              </div>
+              <div class="home-switches">
+                <label class="toggle-row">
+                  <input id="systemProxyEnabled" type="checkbox" checked>
+                  <span class="toggle-track"></span>
+                  <span class="toggle-copy">
+                    <b>系统代理</b>
+                    <small id="systemProxyHint">启动代理后自动接管</small>
+                  </span>
+                </label>
+                <label class="toggle-row">
+                  <input id="globalProxyEnabled" type="checkbox">
+                  <span class="toggle-track"></span>
+                  <span class="toggle-copy">
+                    <b id="homeProxyMode">规则代理</b>
+                    <small id="globalProxyHint">按订阅规则和自定义规则分流</small>
+                  </span>
+                </label>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <h2>订阅</h2>
+                <span id="subscriptionStatus" class="panel-badge muted">未获取节点</span>
+              </div>
+              <div class="subscription-selector-row">
+                <label class="field">当前订阅
+                  <select id="homeSubscriptionSelect" aria-label="选择订阅"></select>
+                </label>
+                <div class="subscription-mini-actions">
+                  <button id="addSubscriptionBtn">新增</button>
+                  <button id="deleteSubscriptionBtn" class="danger ghost">删除</button>
+                </div>
+              </div>
+              <label class="field">订阅名称
+                <input id="homeSubscriptionName" placeholder="例如：主线路">
+              </label>
+              <label class="field">订阅 URL
+                <input id="homeSubscriptionUrl" placeholder="https://example.com/sub.yaml">
+              </label>
+              <div class="traffic-card">
+                <div class="traffic-main">
+                  <span>剩余流量</span>
+                  <b id="homeTrafficRemain">-</b>
+                </div>
+                <div class="traffic-bar"><span id="homeTrafficBar"></span></div>
+                <small id="homeTrafficMeta">下载订阅后显示</small>
+              </div>
+              <div class="actions">
+                <button id="saveSubscriptionBtn">保存订阅</button>
+                <button id="refreshSubBtn" class="primary soft">更新当前订阅</button>
+                <button id="pickConfigBtn">选择离线 YAML</button>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="view-proxy-nodes" class="view">
+          <div class="toolbar">
+            <div>
+              <h2>节点</h2>
+              <span id="nodeScoreSummary">按订阅分组 · 可达性优先</span>
+            </div>
+            <div class="toolbar-actions">
+              <span class="latency-target" title="双模型流式实测 tok/s；手动分组/全量测速完成后切到本轮最快节点；历史值跨重启保留，直到新的有效 tok/s 覆盖">双模型 tok/s · 分组/全量</span>
+              <button id="testAllCodexBtn" class="primary soft">一键全测</button>
+            </div>
+          </div>
+          <div id="nodeGroups" class="node-groups"></div>
+        </section>
+
+        <section id="view-connections" class="view">
+          <div class="toolbar">
+            <div>
+              <h2>连接</h2>
+              <span id="connSummary">连接记录来自主核心控制器</span>
+            </div>
+            <div class="toolbar-actions">
+              <input id="connFilter" class="filter-input" placeholder="过滤 host / 进程 / 规则 / 节点">
+              <button id="refreshConnBtn">刷新</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Host</th>
+                  <th>Rule</th>
+                  <th>Chain</th>
+                  <th>Process</th>
+                  <th>Up</th>
+                  <th>Down</th>
+                </tr>
+              </thead>
+              <tbody id="connRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="view-logs" class="view">
+          <div class="toolbar">
+            <div>
+              <h2>日志</h2>
+              <span>客户端、核心、连接记录</span>
+            </div>
+            <div class="toolbar-actions">
+              <input id="logFilter" class="filter-input" placeholder="过滤日志关键字">
+              <button id="copyLogsBtn">复制当前日志</button>
+              <button id="clearLogsBtn">清空</button>
+            </div>
+          </div>
+          <pre id="logBox" class="logs"></pre>
+        </section>
+
+        <section id="view-settings" class="view">
+          <div class="settings-shell">
+            <section class="settings-section span">
+              <div class="section-title">
+                <h2>配置来源</h2>
+                <span id="coreBadge" class="panel-badge">sing-box</span>
+              </div>
+              <div class="settings-grid">
+                <label class="field">当前订阅
+                  <select id="subscriptionSelect" aria-label="选择订阅"></select>
+                </label>
+                <label class="field">订阅名称 <input id="subscriptionName" placeholder="例如：备用线路"></label>
+                <label class="field wide">订阅 URL <input id="subscriptionUrl" placeholder="https://example.com/sub.yaml"></label>
+                <label class="field">离线 YAML（加入统一节点池） <input id="configPath" readonly placeholder="选择 Clash/Mihomo YAML"></label>
+              </div>
+            </section>
+
+            <section class="settings-section">
+              <div class="section-title"><h2>内核</h2></div>
+              <div class="settings-grid">
+                <label class="field wide">sing-box 路径 <input id="singBoxPath" placeholder="默认使用目录内 sing-box.exe"></label>
+                <div class="button-row">
+                  <button id="pickCoreBtn">选择内核</button>
+                  <button id="checkCoreBtn">检查更新</button>
+                  <button id="downloadSingBoxBtn">下载 sing-box</button>
+                </div>
+              </div>
+            </section>
+
+            <section class="settings-section">
+              <div class="section-title"><h2>代理端口</h2></div>
+              <div class="settings-grid compact">
+                <label class="field">代理端口 <input id="mainPort" type="number" min="1" max="65535" value="18799"></label>
+              </div>
+            </section>
+
+            <section class="settings-section span">
+              <div class="section-title"><h2>路由规则</h2></div>
+              <div class="settings-grid">
+                <label class="field">目标组 <input id="targetGroup" value="SmartProxy"></label>
+                <label class="field">包含节点正则 <input id="includeRegex"></label>
+                <label class="field">排除节点正则 <input id="excludeRegex"></label>
+              </div>
+            </section>
+
+            <section class="settings-section span">
+              <div class="section-title"><h2>节点分组与抖动熔断</h2></div>
+              <div class="settings-grid compact">
+                <label class="check-row">
+                  <input id="jitterGuardEnabled" type="checkbox" checked>
+                  <span title="120 秒窗口内命中任意两条即判机场抖动：①出错节点 ≥2 ②连接中途断流 ≥6 条且过半 ③自动切换 ≥2 次。判中后当前组整组冷却并切到其他组；普通超时仍在组内优先切换。"><b>抖动跨组熔断</b><small>抖动切组 · 超时组内切</small></span>
+                </label>
+                <label class="check-row probe-interval-row" title="判为抖动后，该组在冷却期内不参与任何自动切换">
+                  <span><b>组冷却（分钟）</b></span>
+                  <input id="jitterCooldownMinutes" type="number" min="1" max="120" step="1" class="interval-input">
+                </label>
+                <label class="check-row">
+                  <input id="autoRecoverOnEndpointFailure" type="checkbox" checked>
+                  <span title="机场入口域名下线时，本地订阅已过期。自动拉取新订阅并验证；只有新配置确实带来更多可用节点才重建内核，且优先挑没有 Claude 流量的空档执行，避免打断对话。"><b>入口失效自动更新订阅</b><small>验证有效后择机应用</small></span>
+                </label>
+              </div>
+              <div class="table-wrap compact-table">
+                <table class="rule-table">
+                  <thead>
+                    <tr>
+                      <th>组</th>
+                      <th>组名</th>
+                      <th>匹配对象</th>
+                      <th>匹配正则</th>
+                    </tr>
+                  </thead>
+                  <tbody id="nodeGroupRuleRows"></tbody>
+                </table>
+              </div>
+              <small class="group-rule-hint" title="节点按行序逐条匹配，命中即归组；正则留空的行是兜底组，收下所有未命中节点，须放最后。改完点「保存设置」生效。">按行序匹配 · 正则留空 = 兜底组</small>
+            </section>
+
+            <section class="settings-section span">
+              <div class="section-title"><h2>自定义规则</h2></div>
+              <div class="rule-controls">
+                <select id="customRuleType">
+                  <option value="DOMAIN-SUFFIX-SET">域名后缀集合</option>
+                  <option value="DOMAIN-SUFFIX">域名后缀</option>
+                  <option value="DOMAIN-KEYWORD">域名关键字</option>
+                  <option value="DOMAIN">完整域名</option>
+                  <option value="PROCESS-NAME">EXE 精确</option>
+                  <option value="PROCESS-KEYWORD">EXE 模糊</option>
+                  <option value="PROCESS-NAME-REGEX">EXE 正则</option>
+                  <option value="PROCESS-PATH-REGEX">路径正则</option>
+                </select>
+                <input id="customRuleValue" placeholder="github.com 或 parsec">
+                <select id="customRuleOutbound">
+                  <option value="SMART">目标组</option>
+                  <option value="DIRECT">DIRECT</option>
+                  <option value="REJECT">REJECT</option>
+                </select>
+                <select id="customRulePosition">
+                  <option value="prepend">前置</option>
+                  <option value="append">后置</option>
+                </select>
+                <button id="addCustomRuleBtn" class="primary soft">添加</button>
+              </div>
+              <div class="table-wrap compact-table">
+                <table class="rule-table">
+                  <thead>
+                    <tr>
+                      <th>类型</th>
+                      <th>内容</th>
+                      <th>策略</th>
+                      <th>位置</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="customRuleRows"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="settings-section span">
+              <div class="section-title"><h2>运行选项</h2></div>
+              <div class="settings-grid compact">
+                <label class="check-row"><input id="autoStartSilent" type="checkbox" checked> 开机自动静默启动</label>
+                <label class="check-row continuous-probe-row">
+                  <input id="continuousWssAutoSwitchEnabled" type="checkbox">
+                  <span title="按上次榜单顺序循环更新 tok/s；持续测速只更新榜单，不切换节点。"><b>持续测速（不切节点）</b><small>手动分组/全量测速完成后才切到本轮最快节点</small></span>
+                </label>
+                <label class="check-row probe-interval-row" title="每轮全量测速结束后等待的时间；0 = 不间歇连续测。修改即时生效。">
+                  <span><b>测速间隔（分钟）</b><small>0 = 连续</small></span>
+                  <input id="continuousProbeIntervalMinutes" type="number" min="0" max="1440" step="1" class="interval-input">
+                </label>
+                <label class="field" title="测速第一步的可达性检测请求地址；留空 = Anthropic Messages API（https://api.anthropic.com/v1/messages）">可达检测网址
+                  <input id="probeGateUrl" type="text" placeholder="留空 = Anthropic API">
+                </label>
+                <label class="field">核心日志级别
+                  <select id="logLevel">
+                    <option value="silent">silent</option>
+                    <option value="error">error</option>
+                    <option value="warning">warning</option>
+                    <option value="info" selected>info</option>
+                    <option value="debug">debug</option>
+                  </select>
+                </label>
+              </div>
+              <div class="actions sticky-actions">
+                <button id="saveSettingsBtn" class="primary">保存设置</button>
+                <span id="settingsSaveStatus" class="save-status">未保存</span>
+                <span class="actions-spacer"></span>
+                <button id="stopAllBtn" class="danger ghost">停止全部</button>
+                <button id="quitAppBtn" class="danger ghost">退出程序</button>
+              </div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script>
+      // 顺序注入应用脚本，并带唯一时间戳。
+      // 【必须】托盘「重载界面」靠 location.reload()，而写死 ?v= 的脚本会命中
+      // WebView2 的 HTTP 缓存 —— 实测重载后跑的仍是旧代码。时间戳保证每次
+      // 重载都真正读磁盘上的最新文件（本地文件加载，无网络开销）。
+      (function () {
+        var stamp = Date.now();
+        var files = [
+          "/js/neutralino.js",
+          "/vendor/js-yaml.min.js",
+          "/js/config-helpers.js",
+          "/js/main.js"
+        ];
+        (function next(i) {
+          if (i >= files.length) return;
+          var s = document.createElement("script");
+          s.src = files[i] + "?r=" + stamp;
+          s.onload = function () { next(i + 1); };
+          s.onerror = function () { next(i + 1); };
+          document.head.appendChild(s);
+        })(0);
+      })();
+    </script>
+  </body>
+</html>
