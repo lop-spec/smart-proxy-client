@@ -21,7 +21,7 @@ const artifacts = {
   singBox: {
     url: "https://github.com/SagerNet/sing-box/releases/download/v1.13.13/sing-box-1.13.13-windows-amd64.zip",
     archiveSha256: "aea1fa983134a2e2d0600581d1178e98bd6bb93ae12ad8c333eaacae68a1694c",
-    executableSha256: "cf5d9af7871e703a4f0d410500378655b5dbc1fa482c7af5606fe76404177938"
+    executableSha256: "af59a77a8171dd74b0b560ce34439a85b44cb82d87acfd8b6d2c4c933ad0397d"
   },
   font: {
     url: "https://raw.githubusercontent.com/notofonts/noto-cjk/165c01b46ea533872e002e0785ff17e44f6d97d8/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf",
