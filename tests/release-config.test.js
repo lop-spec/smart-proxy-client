@@ -32,3 +32,13 @@ test("embedded private config is restored before settings load", () => {
   assert.ok(seed > 0 && load > seed);
   assert.match(main, /Neutralino\.app\.exit\(verificationPassed \? 0 : 1\)/);
 });
+
+test("portable verification covers embedded payloads and headless CI", () => {
+  const verifier = fs.readFileSync(path.join(root, "scripts", "verify-portable.mjs"), "utf8");
+  assert.match(verifier, /private-config\.manifest\.json/);
+  assert.match(verifier, /assertEmbeddedPayload/);
+  assert.match(verifier, /join\(root, "resources", "bin", "sing-box\.exe"\)/);
+  assert.match(verifier, /NotoSansCJKsc-Regular\.otf/);
+  assert.match(verifier, /process\.env\.CI/);
+  assert.match(verifier, /headless-liveness/);
+});

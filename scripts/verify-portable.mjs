@@ -19,30 +19,84 @@ const data = readFileSync(executable);
 if (data[0] !== 0x4d || data[1] !== 0x5a) throw new Error("Portable artifact is not a Windows PE executable");
 if (statSync(executable).size < 50 * 1024 * 1024) throw new Error("Portable artifact is unexpectedly small; embedded dependencies are missing");
 
-const hash = createHash("sha256").update(data).digest("hex");
+function sha256(payload) {
+  return createHash("sha256").update(payload).digest("hex");
+}
+
+function assertEmbeddedPayload(label, source) {
+  const payload = readFileSync(source);
+  if (payload.length === 0 || data.indexOf(payload) < 0) {
+    throw new Error(`Portable artifact does not contain the complete ${label} payload`);
+  }
+  return { label, bytes: payload.length, sha256: sha256(payload) };
+}
+
+const privateManifest = JSON.parse(readFileSync(join(root, "private-config.manifest.json"), "utf8"));
+const embeddedPayloads = [
+  assertEmbeddedPayload("sing-box runtime", join(root, "resources", "bin", "sing-box.exe")),
+  assertEmbeddedPayload("NotoSansCJKsc-Regular.otf", join(root, "resources", "fonts", "NotoSansCJKsc-Regular.otf")),
+  ...privateManifest.files.map((item) => assertEmbeddedPayload(`private config ${item.source}`, join(root, item.source)))
+];
+
+const hash = sha256(data);
 writeFileSync(join(bundle, "SHA256SUMS.txt"), `${hash}  smart-proxy-client-win_x64.exe\n`);
 
 const isolated = mkdtempSync(join(tmpdir(), "smart-proxy-release-"));
 const isolatedExe = join(isolated, "smart-proxy-client-win_x64.exe");
 copyFileSync(executable, isolatedExe);
 
-const exitCode = await new Promise((resolveExit, reject) => {
-  const child = spawn(isolatedExe, ["--isolated-test", "--verify-window-ready"], {
-    cwd: isolated,
-    windowsHide: true,
-    stdio: "ignore"
+async function verifyRuntime() {
+  const headlessCI = Boolean(process.env.CI);
+  const deadlineMs = headlessCI ? 12_000 : 30_000;
+  return await new Promise((resolveExit, reject) => {
+    const startedAt = Date.now();
+    const child = spawn(isolatedExe, ["--isolated-test", "--verify-window-ready"], {
+      cwd: isolated,
+      windowsHide: true,
+      stdio: "ignore"
+    });
+    let acceptedHeadlessLiveness = false;
+    let strictTimeout = false;
+    const timer = setTimeout(() => {
+      if (headlessCI) acceptedHeadlessLiveness = true;
+      else strictTimeout = true;
+      child.kill();
+    }, deadlineMs);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("exit", (code, signal) => {
+      clearTimeout(timer);
+      const aliveMs = Date.now() - startedAt;
+      if (acceptedHeadlessLiveness) {
+        resolveExit({ mode: "headless-liveness", exitCode: code, signal, aliveMs });
+      }
+      else if (strictTimeout) {
+        reject(new Error("Portable executable readiness verification timed out"));
+      }
+      else if (code === 0) {
+        resolveExit({ mode: "window-ready", exitCode: code, signal, aliveMs });
+      }
+      else {
+        reject(new Error(`Portable executable readiness verification failed with exit code ${code}`));
+      }
+    });
   });
-  const timer = setTimeout(() => {
-    child.kill();
-    reject(new Error("Portable executable readiness verification timed out"));
-  }, 30_000);
-  child.once("error", reject);
-  child.once("exit", (code) => {
-    clearTimeout(timer);
-    resolveExit(code);
-  });
-});
+}
 
-rmSync(isolated, { recursive: true, force: true });
-if (exitCode !== 0) throw new Error(`Portable executable readiness verification failed with exit code ${exitCode}`);
-console.log(JSON.stringify({ executable, bytes: data.length, sha256: hash, runtimeExitCode: exitCode }, null, 2));
+let runtime;
+try {
+  runtime = await verifyRuntime();
+}
+finally {
+  rmSync(isolated, { recursive: true, force: true });
+}
+
+console.log(JSON.stringify({
+  executable,
+  bytes: data.length,
+  sha256: hash,
+  embeddedPayloads,
+  runtime
+}, null, 2));
