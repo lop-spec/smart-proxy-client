@@ -98,27 +98,38 @@ async function verifyRuntime() {
 }
 
 let runtime;
-let extractedProbeResources;
+let probeResourceExtraction;
 try {
   runtime = await verifyRuntime();
   const extractedRoot = join(isolated, "smart-proxy-data", "runtime", "probe-resources");
-  extractedProbeResources = [
-    assertExtractedPayload(
-      "Codex subscription probe helper",
-      join(root, "resources", "scripts", "codex-subscription-probe.ps1"),
-      join(extractedRoot, "scripts", "codex-subscription-probe.ps1")
-    ),
-    assertExtractedPayload(
-      "dual-model probe helper",
-      join(root, "resources", "scripts", "dual-model-probe.js"),
-      join(extractedRoot, "scripts", "dual-model-probe.js")
-    ),
-    assertExtractedPayload(
-      "probe config helper",
-      join(root, "resources", "js", "config-helpers.js"),
-      join(extractedRoot, "js", "config-helpers.js")
-    )
-  ];
+  if (runtime.mode === "window-ready") {
+    probeResourceExtraction = {
+      verified: true,
+      payloads: [
+        assertExtractedPayload(
+          "Codex subscription probe helper",
+          join(root, "resources", "scripts", "codex-subscription-probe.ps1"),
+          join(extractedRoot, "scripts", "codex-subscription-probe.ps1")
+        ),
+        assertExtractedPayload(
+          "dual-model probe helper",
+          join(root, "resources", "scripts", "dual-model-probe.js"),
+          join(extractedRoot, "scripts", "dual-model-probe.js")
+        ),
+        assertExtractedPayload(
+          "probe config helper",
+          join(root, "resources", "js", "config-helpers.js"),
+          join(extractedRoot, "js", "config-helpers.js")
+        )
+      ]
+    };
+  }
+  else {
+    probeResourceExtraction = {
+      verified: false,
+      reason: `${runtime.mode} does not execute the WebView extraction path`
+    };
+  }
 }
 finally {
   rmSync(isolated, { recursive: true, force: true });
@@ -129,6 +140,6 @@ console.log(JSON.stringify({
   bytes: data.length,
   sha256: hash,
   embeddedPayloads,
-  extractedProbeResources,
+  probeResourceExtraction,
   runtime
 }, null, 2));

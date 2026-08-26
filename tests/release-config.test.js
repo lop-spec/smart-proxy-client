@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
 
@@ -46,23 +47,50 @@ test("portable verification covers embedded payloads and headless CI", () => {
   assert.match(verifier, /headless-liveness/);
 });
 
-test("portable probe helpers fall back to their embedded resources", () => {
+test("portable probe helpers fall back to their embedded resources", async () => {
   const main = fs.readFileSync(path.join(root, "resources", "js", "main.js"), "utf8");
-  const start = main.indexOf("async function bundledProbeScriptPath(");
-  const end = main.indexOf("async function ensureCodexProbeReady()", start);
+  const start = main.indexOf("const bundledProbeScriptPromises = new Map();");
+  const end = main.indexOf("async function codexSubscriptionProbeScriptPath()", start);
   assert.ok(start > 0 && end > start, "the shared embedded probe-script resolver must exist");
   const resolver = main.slice(start, end);
-  assert.match(resolver, /Neutralino\.resources\.extractFile\(`\/resources\/scripts\/\$\{fileName\}`/);
-  assert.match(resolver, /Neutralino\.resources\.extractFile\("\/resources\/js\/config-helpers\.js"/);
-  assert.match(resolver, /state\.paths\.work/);
-  assert.match(resolver, /getJoinedPath\(resourceRoot, "scripts"\)/);
-  assert.match(resolver, /getJoinedPath\(resourceRoot, "js"\)/);
-  assert.match(resolver, /removeFileIfExists\(target\)/, "an app update must replace stale extracted helpers");
-  assert.match(resolver, /codexSubscriptionProbeScriptPath\(\)[\s\S]*bundledProbeScriptPath\(CODEX_TOK_PROBE_SCRIPT/);
-  assert.match(resolver, /dualModelProbeScriptPath\(\)[\s\S]*bundledProbeScriptPath\(TOK_PROBE_BATCH_SCRIPT/);
+  const files = new Set();
+  const directories = [];
+  const extractions = [];
+  const context = {
+    state: { paths: { appRoot: "C:\\portable", work: "C:\\portable-data\\runtime" } },
+    Neutralino: {
+      filesystem: { getJoinedPath: async (...parts) => path.win32.join(...parts) },
+      resources: {
+        extractFile: async (source, target) => {
+          extractions.push([source, target]);
+          files.add(target);
+        }
+      }
+    },
+    access: async (target) => files.has(target),
+    ensureDirectory: async (target) => directories.push(target),
+    removeFileIfExists: async (target) => files.delete(target),
+    log: () => {}
+  };
+  vm.runInNewContext(`${resolver}\nglobalThis.resolveBundledProbe = bundledProbeScriptPath;`, context);
+
+  const target = path.win32.join("C:\\portable-data\\runtime", "probe-resources", "scripts", "dual-model-probe.js");
+  const helper = path.win32.join("C:\\portable-data\\runtime", "probe-resources", "js", "config-helpers.js");
+  assert.equal(await context.resolveBundledProbe("dual-model-probe.js", "Dual-model probe helper"), target);
+  assert.deepEqual(extractions, [
+    ["/resources/js/config-helpers.js", helper],
+    ["/resources/scripts/dual-model-probe.js", target]
+  ]);
+  assert.deepEqual(directories, [path.win32.dirname(target), path.win32.dirname(helper)]);
+  assert.ok(files.has(target));
+  assert.ok(files.has(helper));
+
+  const wiring = main.slice(end, main.indexOf("async function ensureCodexProbeReady()", end));
+  assert.match(wiring, /codexSubscriptionProbeScriptPath\(\)[\s\S]*bundledProbeScriptPath\(CODEX_TOK_PROBE_SCRIPT/);
+  assert.match(wiring, /dualModelProbeScriptPath\(\)[\s\S]*bundledProbeScriptPath\(TOK_PROBE_BATCH_SCRIPT/);
 });
 
-test("portable runtime verification exercises probe-resource extraction", () => {
+test("portable runtime verification requires extraction only after WebView readiness", () => {
   const main = fs.readFileSync(path.join(root, "resources", "js", "main.js"), "utf8");
   const verification = main.slice(
     main.indexOf("if (verifyWindowReady)"),
@@ -74,6 +102,8 @@ test("portable runtime verification exercises probe-resource extraction", () => 
 
   const verifier = fs.readFileSync(path.join(root, "scripts", "verify-portable.mjs"), "utf8");
   assert.match(verifier, /assertExtractedPayload/);
+  assert.match(verifier, /if \(runtime\.mode === "window-ready"\)/);
+  assert.match(verifier, /verified: false[\s\S]*does not execute the WebView extraction path/);
   assert.match(verifier, /join\(isolated, "smart-proxy-data", "runtime", "probe-resources"\)/);
   assert.match(verifier, /join\(extractedRoot, "scripts", "dual-model-probe\.js"\)/);
   assert.match(verifier, /join\(extractedRoot, "scripts", "codex-subscription-probe\.ps1"\)/);
