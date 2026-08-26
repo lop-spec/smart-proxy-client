@@ -3362,20 +3362,55 @@ async function tokenMixProbeKey() {
   return tokenMixProbeKeyCache;
 }
 
-async function codexSubscriptionProbeScriptPath() {
+const bundledProbeScriptPromises = new Map();
+
+async function bundledProbeScriptPath(fileName, label) {
   const resources = await Neutralino.filesystem.getJoinedPath(state.paths.appRoot, "resources");
   const scripts = await Neutralino.filesystem.getJoinedPath(resources, "scripts");
-  const path = await Neutralino.filesystem.getJoinedPath(scripts, CODEX_TOK_PROBE_SCRIPT);
-  if (!await access(path)) throw new Error("Codex subscription probe script is missing: " + path);
-  return path;
+  const direct = await Neutralino.filesystem.getJoinedPath(scripts, fileName);
+  if (await access(direct)) return direct;
+
+  if (!bundledProbeScriptPromises.has(fileName)) {
+    const promise = (async () => {
+      const resourceRoot = await Neutralino.filesystem.getJoinedPath(state.paths.work, "probe-resources");
+      const targetDir = await Neutralino.filesystem.getJoinedPath(resourceRoot, "scripts");
+      const helperDir = await Neutralino.filesystem.getJoinedPath(resourceRoot, "js");
+      await ensureDirectory(targetDir);
+      await ensureDirectory(helperDir);
+      const target = await Neutralino.filesystem.getJoinedPath(targetDir, fileName);
+      const helperTarget = await Neutralino.filesystem.getJoinedPath(helperDir, "config-helpers.js");
+      await removeFileIfExists(target);
+      await removeFileIfExists(helperTarget);
+      try {
+        await Neutralino.resources.extractFile("/resources/js/config-helpers.js", helperTarget);
+        await Neutralino.resources.extractFile(`/resources/scripts/${fileName}`, target);
+      }
+      catch (err) {
+        throw new Error(`${label} is missing from the portable executable: ${err.message || err}`);
+      }
+      if (!await access(target) || !await access(helperTarget)) {
+        throw new Error(`${label} dependencies could not be extracted: ${target}`);
+      }
+      log(`Bundled probe helper restored: ${fileName}`);
+      return target;
+    })();
+    bundledProbeScriptPromises.set(fileName, promise);
+  }
+  try {
+    return await bundledProbeScriptPromises.get(fileName);
+  }
+  catch (err) {
+    bundledProbeScriptPromises.delete(fileName);
+    throw err;
+  }
+}
+
+async function codexSubscriptionProbeScriptPath() {
+  return bundledProbeScriptPath(CODEX_TOK_PROBE_SCRIPT, "Codex subscription probe script");
 }
 
 async function dualModelProbeScriptPath() {
-  const resources = await Neutralino.filesystem.getJoinedPath(state.paths.appRoot, "resources");
-  const scripts = await Neutralino.filesystem.getJoinedPath(resources, "scripts");
-  const path = await Neutralino.filesystem.getJoinedPath(scripts, TOK_PROBE_BATCH_SCRIPT);
-  if (!await access(path)) throw new Error("Dual-model probe helper is missing: " + path);
-  return path;
+  return bundledProbeScriptPath(TOK_PROBE_BATCH_SCRIPT, "Dual-model probe helper");
 }
 
 async function ensureCodexProbeReady() {
@@ -5608,12 +5643,23 @@ async function boot() {
   state.pendingWindowShowReason = "";
   if (verifyWindowReady) {
     const surfaceReady = document.readyState !== "loading" && !!document.querySelector(".app");
-    const verificationPassed = pendingWindowShowReason === "instance-command" && surfaceReady;
+    let probeResourcesReady = false;
+    try {
+      const dualModelScript = await dualModelProbeScriptPath();
+      const codexSubscriptionScript = await codexSubscriptionProbeScriptPath();
+      probeResourcesReady = await access(dualModelScript) && await access(codexSubscriptionScript);
+    }
+    catch (err) {
+      log(`Probe resource verification failed: ${err.message || err}`);
+    }
+    const verificationPassed = pendingWindowShowReason === "instance-command"
+      && surfaceReady
+      && probeResourcesReady;
     if (verificationPassed) {
-      log("Window readiness verification passed: deferred=true surface=true");
+      log("Window readiness verification passed: deferred=true surface=true probeResources=true");
     }
     else {
-      log(`Window readiness verification failed: deferred=${pendingWindowShowReason || "none"} surface=${surfaceReady}`);
+      log(`Window readiness verification failed: deferred=${pendingWindowShowReason || "none"} surface=${surfaceReady} probeResources=${probeResourcesReady}`);
     }
     await Neutralino.window.hide().catch(() => {});
     await Neutralino.app.exit(verificationPassed ? 0 : 1);

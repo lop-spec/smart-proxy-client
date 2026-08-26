@@ -38,7 +38,44 @@ test("portable verification covers embedded payloads and headless CI", () => {
   assert.match(verifier, /private-config\.manifest\.json/);
   assert.match(verifier, /assertEmbeddedPayload/);
   assert.match(verifier, /join\(root, "resources", "bin", "sing-box\.exe"\)/);
+  assert.match(verifier, /join\(root, "resources", "scripts", "codex-subscription-probe\.ps1"\)/);
+  assert.match(verifier, /join\(root, "resources", "scripts", "dual-model-probe\.js"\)/);
+  assert.match(verifier, /join\(root, "resources", "js", "config-helpers\.js"\)/);
   assert.match(verifier, /NotoSansCJKsc-Regular\.otf/);
   assert.match(verifier, /process\.env\.CI/);
   assert.match(verifier, /headless-liveness/);
+});
+
+test("portable probe helpers fall back to their embedded resources", () => {
+  const main = fs.readFileSync(path.join(root, "resources", "js", "main.js"), "utf8");
+  const start = main.indexOf("async function bundledProbeScriptPath(");
+  const end = main.indexOf("async function ensureCodexProbeReady()", start);
+  assert.ok(start > 0 && end > start, "the shared embedded probe-script resolver must exist");
+  const resolver = main.slice(start, end);
+  assert.match(resolver, /Neutralino\.resources\.extractFile\(`\/resources\/scripts\/\$\{fileName\}`/);
+  assert.match(resolver, /Neutralino\.resources\.extractFile\("\/resources\/js\/config-helpers\.js"/);
+  assert.match(resolver, /state\.paths\.work/);
+  assert.match(resolver, /getJoinedPath\(resourceRoot, "scripts"\)/);
+  assert.match(resolver, /getJoinedPath\(resourceRoot, "js"\)/);
+  assert.match(resolver, /removeFileIfExists\(target\)/, "an app update must replace stale extracted helpers");
+  assert.match(resolver, /codexSubscriptionProbeScriptPath\(\)[\s\S]*bundledProbeScriptPath\(CODEX_TOK_PROBE_SCRIPT/);
+  assert.match(resolver, /dualModelProbeScriptPath\(\)[\s\S]*bundledProbeScriptPath\(TOK_PROBE_BATCH_SCRIPT/);
+});
+
+test("portable runtime verification exercises probe-resource extraction", () => {
+  const main = fs.readFileSync(path.join(root, "resources", "js", "main.js"), "utf8");
+  const verification = main.slice(
+    main.indexOf("if (verifyWindowReady)"),
+    main.indexOf("else if (pendingWindowShowReason)")
+  );
+  assert.match(verification, /await dualModelProbeScriptPath\(\)/);
+  assert.match(verification, /await codexSubscriptionProbeScriptPath\(\)/);
+  assert.match(verification, /verificationPassed[\s\S]*probeResourcesReady/);
+
+  const verifier = fs.readFileSync(path.join(root, "scripts", "verify-portable.mjs"), "utf8");
+  assert.match(verifier, /assertExtractedPayload/);
+  assert.match(verifier, /join\(isolated, "smart-proxy-data", "runtime", "probe-resources"\)/);
+  assert.match(verifier, /join\(extractedRoot, "scripts", "dual-model-probe\.js"\)/);
+  assert.match(verifier, /join\(extractedRoot, "scripts", "codex-subscription-probe\.ps1"\)/);
+  assert.match(verifier, /join\(extractedRoot, "js", "config-helpers\.js"\)/);
 });
