@@ -908,25 +908,49 @@
     return results && typeof results === "object" ? results[key] || null : null;
   }
 
+  function codexProbeModelKey(result) {
+    return String(result && (result.resolvedModel || result.requestedModel) || "").trim().toLowerCase();
+  }
+
   function codexProbeRank(result) {
-    if (!result) return { band: 2, tok: 0, ttft: Infinity, delay: Infinity };
+    if (!result) return { band: 2, tok: 0, ttft: Infinity, delay: Infinity, model: "" };
     if (result.status === "done" && result.anthropicOk === false) {
-      return { band: 4, tok: 0, ttft: Infinity, delay: Infinity };
+      return { band: 4, tok: 0, ttft: Infinity, delay: Infinity, model: "" };
     }
     if (result.status === "done" && result.anthropicOk !== false) {
       const tok = Math.max(0, Number(result.tokPerSec) || 0);
       const ttft = Math.max(0, Number(result.tokTtftMs) || 0) || Infinity;
       const delay = Math.max(0, Number(result.delayMs || result.anthropicMs) || 0) || Infinity;
-      return { band: tok > 0 ? 0 : 1, tok, ttft, delay };
+      return { band: tok > 0 ? 0 : 1, tok, ttft, delay, model: codexProbeModelKey(result) };
     }
-    return { band: 3, tok: 0, ttft: Infinity, delay: Infinity };
+    return { band: 3, tok: 0, ttft: Infinity, delay: Infinity, model: "" };
+  }
+
+  function codexProbeModelMedians(items) {
+    const groups = new Map();
+    for (const item of items) {
+      if (item.rank.band !== 0) continue;
+      if (!item.rank.model) return null;
+      if (!groups.has(item.rank.model)) groups.set(item.rank.model, []);
+      groups.get(item.rank.model).push(item.rank.tok);
+    }
+    // 单模型时原始 tok/s 本来就可比；任一模型只有一个样本时也不足以校准。
+    if (groups.size < 2 || [...groups.values()].some((values) => values.length < 2)) return null;
+    return new Map([...groups].map(([model, values]) => [model, nodeLeagueMedian(values)]));
   }
 
   function rankCodexProbeEntries(entries, results) {
-    return [...(Array.isArray(entries) ? entries : [])]
-      .map((entry, index) => ({ entry, index, rank: codexProbeRank(codexProbeResultFor(results, entry && entry.key)) }))
+    const ranked = [...(Array.isArray(entries) ? entries : [])]
+      .map((entry, index) => ({ entry, index, rank: codexProbeRank(codexProbeResultFor(results, entry && entry.key)) }));
+    const medians = codexProbeModelMedians(ranked);
+    ranked.forEach((item) => {
+      const median = medians && medians.get(item.rank.model);
+      // 不改变展示/落盘的端到端 tok/s，只把跨模型排名换成“相对同模型中位数”。
+      item.rank.score = median > 0 ? item.rank.tok / median : item.rank.tok;
+    });
+    return ranked
       .sort((left, right) => left.rank.band - right.rank.band
-        || right.rank.tok - left.rank.tok
+        || right.rank.score - left.rank.score
         || left.rank.ttft - right.rank.ttft
         || left.rank.delay - right.rank.delay
         || left.index - right.index)
@@ -940,13 +964,14 @@
     const hasCurrentTok = (key) => tokSuccessKeys instanceof Set
       ? tokSuccessKeys.has(key)
       : Array.isArray(tokSuccessKeys) ? tokSuccessKeys.includes(key) : false;
-    return rankCodexProbeEntries(entries, results).filter((entry) => {
+    const current = [...(Array.isArray(entries) ? entries : [])].filter((entry) => {
       const key = entry && entry.key;
       return !!key
         && gateFor(key)?.ok === true
         && hasCurrentTok(key)
         && successfulCodexProbeResult(codexProbeResultFor(results, key));
     });
+    return rankCodexProbeEntries(current, results);
   }
 
   function findRestorableNode(entries, settings) {

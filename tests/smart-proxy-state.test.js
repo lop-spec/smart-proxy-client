@@ -78,6 +78,34 @@ assert.deepEqual(
   "next probe queue must follow the previous tok/s ranking and TTFB tie-break"
 );
 
+const crossModelEntries = [
+  { key: "slow-best" },
+  { key: "slow-base" },
+  { key: "fast-base" },
+  { key: "fast-best" }
+];
+const crossModelRanked = helpers.rankCodexProbeEntries(crossModelEntries, {
+  "slow-best": { status: "done", anthropicOk: true, tokPerSec: 30, tokTtftMs: 220, resolvedModel: "model-slow" },
+  "slow-base": { status: "done", anthropicOk: true, tokPerSec: 20, tokTtftMs: 220, resolvedModel: "model-slow" },
+  "fast-base": { status: "done", anthropicOk: true, tokPerSec: 60, tokTtftMs: 220, resolvedModel: "model-fast" },
+  "fast-best": { status: "done", anthropicOk: true, tokPerSec: 70, tokTtftMs: 220, resolvedModel: "model-fast" }
+});
+assert.deepEqual(
+  crossModelRanked.map((entry) => entry.key),
+  ["slow-best", "fast-best", "fast-base", "slow-base"],
+  "cross-model ranking must compare each node with its model median instead of comparing incompatible raw tok/s"
+);
+
+const sparseModelRanked = helpers.rankCodexProbeEntries(crossModelEntries.slice(0, 3), {
+  "slow-best": { status: "done", anthropicOk: true, tokPerSec: 30, tokTtftMs: 220, resolvedModel: "model-slow" },
+  "fast-base": { status: "done", anthropicOk: true, tokPerSec: 60, tokTtftMs: 220, resolvedModel: "model-fast" }
+});
+assert.deepEqual(
+  sparseModelRanked.map((entry) => entry.key),
+  ["fast-base", "slow-best", "slow-base"],
+  "cross-model ranking must fall back to raw tok/s until every model has at least two successful samples"
+);
+
 const currentWinners = helpers.rankCurrentCodexProbeEntries(
   entries,
   {
@@ -94,6 +122,41 @@ assert.deepEqual(
   currentWinners.map((entry) => entry.key),
   ["b"],
   "a stale fast result must not win after its current gate or tok probe failed"
+);
+
+const currentScopedEntries = [
+  ...crossModelEntries,
+  { key: "stale-fast-low-1" },
+  { key: "stale-fast-low-2" }
+];
+const currentResult = (model, tokPerSec) => ({
+  status: "done",
+  anthropicOk: true,
+  tokPerSec,
+  tokTtftMs: 220,
+  requestedModel: model,
+  resolvedModel: model,
+  resolvedModelVerified: true
+});
+const currentScopedResults = {
+  "slow-best": currentResult("model-slow", 30),
+  "slow-base": currentResult("model-slow", 20),
+  "fast-base": currentResult("model-fast", 60),
+  "fast-best": currentResult("model-fast", 70),
+  "stale-fast-low-1": currentResult("model-fast", 1),
+  "stale-fast-low-2": currentResult("model-fast", 2)
+};
+const currentKeys = new Set(crossModelEntries.map((entry) => entry.key));
+const currentScopedRanked = helpers.rankCurrentCodexProbeEntries(
+  currentScopedEntries,
+  currentScopedResults,
+  new Map(currentScopedEntries.map((entry) => [entry.key, { ok: currentKeys.has(entry.key) }])),
+  currentKeys
+);
+assert.deepEqual(
+  currentScopedRanked.map((entry) => entry.key),
+  ["slow-best", "fast-best", "fast-base", "slow-base"],
+  "current-round model medians must exclude stale or failed samples"
 );
 
 const store = helpers.normalizeCodexProbeStore({

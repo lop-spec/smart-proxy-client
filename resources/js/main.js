@@ -4209,7 +4209,8 @@ async function testAllCodexNodes(options = {}) {
     }
     renderProxyNodes();
 
-    // 排名：真实 tok/s 降序（无 tok 值的可达节点按延迟殿后）
+    // 排名：跨模型时按各自本轮 tok/s 中位数归一化；单模型或样本不足时回退原始 tok/s。
+    // 页面与日志仍展示真实的端到端 tok/s，归一化只决定名次。
     const verifiedRanked = SmartProxyConfig.rankCurrentCodexProbeEntries(
       entries,
       state.nodeCodexResults,
