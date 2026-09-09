@@ -1408,17 +1408,21 @@ async function startInstanceSignalWatcher() {
       state.instanceSignalLast = command.token;
       let ok = false;
       try {
-        ok = command.action === "show" ? await requestMainWindowShow("instance-command") : false;
+        if (command.action === "health") ok = !!(state.uiReady && state.mainCoreReady && state.mainProcess);
+        else if (command.action === "show") ok = await requestMainWindowShow("instance-command");
+        else log(`Instance command ignored: unsupported action ${String(command.action).slice(0, 80)}`);
       }
       catch (err) {
         log(`Instance command failed: ${err.message || err}`);
       }
       await Neutralino.filesystem.writeFile(
         state.paths.instanceAck,
-        JSON.stringify({ token: command.token, ok, at: Date.now() })
+        JSON.stringify({ token: command.token, ok, at: Date.now(), pid: Number(state.instanceIdentity?.pid || 0),
+          build: APP_BUILD_ID, coreReady: !!state.mainCoreReady, node: state.currentNode })
       );
     }
-    catch {
+    catch (err) {
+      log(`Instance signal poll failed: ${err.message || err}`);
       return;
     }
     finally {
@@ -4629,6 +4633,12 @@ async function reportUnhealthyNode(reason) {
 }
 
 async function nodeGuardTick() {
+  if (!GATE_CHECK_ENABLED) {
+    state.nodeGuardFails = 0;
+    state.nodeGuardLast = { at: Date.now(), ok: null, skipped: true };
+    log("Anthropic guard disabled: availability unknown; no failure alert or request");
+    return;
+  }
   // 守护走主端口真实路径,不占探测 lane;仅在非 continuous 的手动测速期间让位
   if (!state.mainCoreReady || state.closing || state.nodeGuardEscaping) return;
   if (state.codexProbeRunning && state.codexProbeMode !== "continuous") return;
@@ -4656,9 +4666,14 @@ async function nodeGuardTick() {
 
 function startNodeGuard() {
   if (state.nodeGuardTimer) return;
-  state.nodeGuardTimer = setInterval(() => { nodeGuardTick().catch(() => {}); }, NODE_GUARD_INTERVAL_MS);
-  // 入口域名健康是逃生候选的前提，开机就查一次，别等到第一轮测速（最长 15 分钟）
-  setTimeout(() => { refreshEndpointDnsHealth({ force: true }).catch(() => {}); }, 3000);
+  if (GATE_CHECK_ENABLED) {
+    state.nodeGuardTimer = setInterval(() => { nodeGuardTick().catch(err => log(`Node guard failed: ${err.message || err}`)); }, NODE_GUARD_INTERVAL_MS);
+  } else {
+    state.nodeGuardLast = { at: Date.now(), ok: null, skipped: true };
+    log("Anthropic guard disabled: periodic requests and failure notifications are not scheduled");
+  }
+  // Startup DNS diagnosis is advisory only and never an automatic escape trigger.
+  setTimeout(() => { refreshEndpointDnsHealth({ force: true }).catch(err => log(`DNS diagnosis failed: ${err.message || err}`)); }, 3000);
 }
 
 function renderProxyNodes() {

@@ -168,6 +168,11 @@ test("P3/P4/P5: log batching has a bounded queue, rotation, and throttled render
   assert.match(source,/scheduleLogRender/);
 });
 
+test("disabled Anthropic guard cannot turn unknown into failure alerts", async () => {
+  const a=app();a.run('state.mainCoreReady=true;state.mainProcess={};state.nodeGuardFails=2;ensureProbeAssets=async()=>{throw Error("guard should not issue requests")};');
+  await a.run('nodeGuardTick()');assert.equal(a.run('state.nodeGuardLast.ok'),null);assert.equal(a.run('state.nodeGuardFails'),0);
+  a.run('startNodeGuard()');assert.equal(a.run('state.nodeGuardTimer'),null);
+});
 test("median speed retains the matching sample's token count and elapsed time", () => {
   const values=[{...good(30),tokEst:60,elapsedMs:2000,ttftMs:1500},{...good(10),tokEst:30,elapsedMs:3000,ttftMs:2800},{...good(50),tokEst:100,elapsedMs:2000,ttftMs:800}];
   const result=engine.aggregateSamples(values,'p','r');
