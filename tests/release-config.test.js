@@ -16,11 +16,30 @@ test("release build is pinned and embeds resources", () => {
   assert.match(buildScript, /notofonts\/noto-cjk\/165c01b46ea533872e002e0785ff17e44f6d97d8/);
 });
 
-test("every private configuration in the manifest exists", () => {
+test("public-safe preparation never copies personal seed files", () => {
+  const source = fs.readFileSync(path.join(root, "scripts", "prepare-runtime.mjs"), "utf8");
+  const start = source.indexOf("function preparePrivateConfig()");
+  const end = source.indexOf("await Promise.all", start);
+  let policy = null;
+  const context = { root: "C:/fixture", join: path.win32.join, JSON, console,
+    rmSync: target => assert.match(target, /resources\\private-config$/), mkdirSync: () => {},
+    copyFileSync: () => { throw new Error("Personal configuration must never be copied into resources"); },
+    writeFileSync: (_target, text) => { policy = JSON.parse(text); } };
+  vm.runInNewContext(source.slice(start, end) + "\npreparePrivateConfig();", context);
+  assert.deepEqual(policy.files, []);
+  assert.equal(policy.privateSeedsIncluded, false);
+  const verifier = fs.readFileSync(path.join(root, "scripts", "verify-portable.mjs"), "utf8");
+  assert.match(verifier, /Personal configuration leaked into artifact/);
+});
+
+test("personal manifest paths are local-only and excluded from future source trees", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(root, "private-config.manifest.json"), "utf8"));
+  const ignore = fs.readFileSync(path.join(root, ".gitignore"), "utf8");
   assert.ok(manifest.files.length >= 8);
+  assert.match(ignore, /^\/smart-proxy-data\/$/m);
+  assert.match(ignore, /^\/flashfox-smart-proxy-offline\.yaml$/m);
   for (const item of manifest.files) {
-    assert.ok(fs.existsSync(path.join(root, item.source)), item.source);
+    assert.ok(item.source.startsWith("smart-proxy-data/") || item.source === "flashfox-smart-proxy-offline.yaml");
     assert.ok(["app", "data", "runtime"].includes(item.scope), item.scope);
     assert.equal(path.basename(item.name), item.name);
   }
@@ -88,6 +107,7 @@ test("portable probe helpers fall back to their embedded resources", async () =>
   const wiring = main.slice(end, main.indexOf("async function ensureCodexProbeReady()", end));
   assert.match(wiring, /codexSubscriptionProbeScriptPath\(\)[\s\S]*bundledProbeScriptPath\(CODEX_TOK_PROBE_SCRIPT/);
   assert.match(wiring, /dualModelProbeScriptPath\(\)[\s\S]*bundledProbeScriptPath\(TOK_PROBE_BATCH_SCRIPT/);
+  assert.match(resolver, /NL_RESMODE === "directory"/, "embedded builds must not load stale external probe scripts");
 });
 
 test("portable runtime verification requires extraction only after WebView readiness", () => {

@@ -15,13 +15,6 @@ backups/
 .tmp/
 neutralinojs.log
 
-# Keep the personal configuration snapshot, but never commit volatile runtime
-# output, WebView profiles, locks, probe payloads, or logs.
-smart-proxy-data/**
-!smart-proxy-data/settings.json
-!smart-proxy-data/runtime/
-smart-proxy-data/runtime/**
-!smart-proxy-data/runtime/main.json
-!smart-proxy-data/runtime/dns-test.json
-!smart-proxy-data/runtime/subscription*.yaml
-!smart-proxy-data/runtime/subscription*.yaml.source-url.txt
+# Personal assets stay on this machine, not in source archives or releases.
+/smart-proxy-data/
+/flashfox-smart-proxy-offline.yaml

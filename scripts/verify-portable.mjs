@@ -41,13 +41,43 @@ function assertExtractedPayload(label, source, target) {
 }
 
 const privateManifest = JSON.parse(readFileSync(join(root, "private-config.manifest.json"), "utf8"));
+const seedPolicy = JSON.parse(readFileSync(join(root, "resources", "private-config", "manifest.json"), "utf8"));
+if (seedPolicy.files.length || seedPolicy.privateSeedsIncluded !== false) throw new Error("Artifact must not embed personal configuration");
+function embeddedFilePaths(buffer) {
+  let offset = -1;
+  while ((offset = buffer.indexOf('{"files":', offset + 1)) >= 0) {
+    if (offset < 4) continue;
+    const length = buffer.readUInt32LE(offset - 4);
+    if (length < 10 || length > 4 * 1024 * 1024 || offset + length > buffer.length) continue;
+    let tree;
+    try { tree = JSON.parse(buffer.subarray(offset, offset + length).toString("utf8")); } catch { continue; }
+    if (!tree.files?.resources) continue;
+    const paths = [];
+    const walk = (entry, parent = "") => {
+      for (const [name, item] of Object.entries(entry.files || {})) {
+        const full = parent ? parent + "/" + name : name;
+        if (item.files) walk(item, full); else paths.push(full);
+      }
+    };
+    walk(tree);
+    if (paths.includes("resources/js/main.js")) return paths;
+  }
+  throw new Error("Embedded ASAR file tree could not be verified");
+}
+const resourcePaths = embeddedFilePaths(data);
+const privatePaths = new Set(privateManifest.files.map(item => "resources/private-config/files/" + item.source));
+for (const file of resourcePaths) {
+  if (privatePaths.has(file) || /private-config\/files\/|smart-proxy-data\/|(?:^|\/)auth\.json$|\.source-url\.txt$/.test(file)) {
+    throw new Error(`Personal configuration leaked into artifact: ${file}`);
+  }
+}
 const embeddedPayloads = [
   assertEmbeddedPayload("sing-box runtime", join(root, "resources", "bin", "sing-box.exe")),
   assertEmbeddedPayload("Codex subscription probe helper", join(root, "resources", "scripts", "codex-subscription-probe.ps1")),
   assertEmbeddedPayload("dual-model probe helper", join(root, "resources", "scripts", "dual-model-probe.js")),
   assertEmbeddedPayload("probe config helper", join(root, "resources", "js", "config-helpers.js")),
   assertEmbeddedPayload("NotoSansCJKsc-Regular.otf", join(root, "resources", "fonts", "NotoSansCJKsc-Regular.otf")),
-  ...privateManifest.files.map((item) => assertEmbeddedPayload(`private config ${item.source}`, join(root, item.source)))
+  assertEmbeddedPayload("public-safe seed policy", join(root, "resources", "private-config", "manifest.json"))
 ];
 
 const hash = sha256(data);
@@ -62,7 +92,7 @@ async function verifyRuntime() {
   const deadlineMs = headlessCI ? 12_000 : 30_000;
   return await new Promise((resolveExit, reject) => {
     const startedAt = Date.now();
-    const child = spawn(isolatedExe, ["--isolated-test", "--verify-window-ready"], {
+    const child = spawn(isolatedExe, ["--isolated-test", "--verify-window-ready", "--window-hidden=true"], {
       cwd: isolated,
       windowsHide: true,
       stdio: "ignore"
@@ -140,6 +170,7 @@ console.log(JSON.stringify({
   bytes: data.length,
   sha256: hash,
   embeddedPayloads,
+  privateConfigExcluded: true,
   probeResourceExtraction,
   runtime
 }, null, 2));

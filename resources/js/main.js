@@ -3,7 +3,11 @@ const MAIN_CONTROLLER_TIMEOUT_MS = 8000;
 const MAIN_CORE_START_ATTEMPTS = 3;
 const MAIN_CORE_RETRY_DELAY_MS = 450;
 const APP_CONFIG_VERSION = 17;
-const APP_BUILD_ID = "2026-08-24-failed-node-clears-tok-v2-v35";
+const APP_BUILD_ID = "2026-09-09-bounded-fair-probes-v1.1.0";
+const LOG_MAX_FILE_BYTES = 8 * 1024 * 1024;
+const LOG_MAX_BUFFER_BYTES = 256 * 1024;
+const LOG_FLUSH_MS = 500;
+const CONTROLLER_REQUEST_TIMEOUT_MS = 5000;
 const PORTABLE_DATA_DIR = "smart-proxy-data";
 const BUNDLED_PRIVATE_CONFIG_MANIFEST = "/resources/private-config/manifest.json";
 const LOCAL_YAML_SOURCE_ID = "__offline-yaml__";
@@ -28,7 +32,7 @@ const ANTHROPIC_PROBE_HOST = "api.anthropic.com";
 // survivors to drain it, while a node-specific failure is final and never re-tested.
 const CODEX_TOK_PROBE_HOST = "chatgpt.com";
 const CODEX_TOK_PROBE_MODEL = "gpt-5.3-codex-spark";
-const CODEX_TOK_PROBE_TIMEOUT_S = 8;
+const CODEX_TOK_PROBE_TIMEOUT_S = 30;
 const CODEX_TOK_PROBE_HOMES_ROOT = "C:/Users/lop/Documents/claude/vscodium/homes";
 const CODEX_TOK_PROBE_SCRIPT = "codex-subscription-probe.ps1";
 const TOK_PROBE_BATCH_SCRIPT = "dual-model-probe.js";
@@ -37,7 +41,7 @@ const TOKENMIX_TOK_PROBE_HOST = "api.tokenmix.ai";
 const TOKENMIX_TOK_PROBE_KEY_FILE = "C:/Users/lop/Documents/Codex/共享文件夹/gpt账号.txt";
 const TOKENMIX_TOK_PROBE_MODEL = "gpt-4o-mini";
 const TOKENMIX_TOK_PROBE_MAX_TOKENS = 128;
-const TOKENMIX_TOK_PROBE_TIMEOUT_S = 8;
+const TOKENMIX_TOK_PROBE_TIMEOUT_S = 30;
 const TOKENMIX_TOK_PROBE_MIN_STREAM_MS = 300;
 // Auto mode is resolved by the batch helper to the real stable windows measured on
 // this machine (50 per GPT account, 20 TokenMix). All four routes still share one
@@ -160,6 +164,7 @@ const DEFAULT_SETTINGS = {
   lastSelectedNodeKey: "",
   lastSelectedNodeTag: "",
   codexProbeStore: { version: 1, updatedAt: 0, results: {} },
+  benchmarkProfile: "codex",
   // 节点分组规则：按顺序匹配，pattern 为空 = 兜底组（放最后）。
   // field: "subscription" 匹配「订阅id 订阅名」，"node" 匹配节点名。
   nodeGroupRules: [
@@ -180,6 +185,10 @@ const state = {
   subscriptionNodeCatalog: [],
   logs: [],
   logWriteChain: Promise.resolve(),
+  logBuffer: [], logBufferBytes: 0, logDropped: 0, logFlushTimer: null, logFlushBusy: false,
+  logFileBytes: null, logRenderTimer: null,
+  connectionRefreshPromise: null, connectionPollGeneration: 0, lastConnectionsHtml: "", lastCurrentNodeCheckAt: 0,
+  probeJob: null, lastProbeRoundId: "",
   connections: [],
   seenConnections: new Set(),
   coreProcessByConnId: new Map(),
@@ -197,6 +206,7 @@ const state = {
   logSocket: null,
   connTimer: null,
   currentView: "home",
+  surfaceVisible: false,
   subscriptionTraffic: null,
   lastConnectionRefreshByTarget: new Map(),
   currentNode: "-",
@@ -334,22 +344,74 @@ function mainController() {
 
 
 function log(message) {
-  const line = `[${nowText()}] ${message}`;
-  state.logs.unshift(line);
-  state.logs = state.logs.slice(0, 2000);
-  if (state.currentView === "logs") renderLogs();
-  if (
-    state.paths.appLog
-    && typeof Neutralino !== "undefined"
-    && Neutralino.filesystem
-    && Neutralino.filesystem.appendFile
-  ) {
-    state.logWriteChain = state.logWriteChain
-      .then(() => Neutralino.filesystem.appendFile(state.paths.appLog, `${line}\r\n`))
-      .catch((err) => {
-        console.error("persistent log append failed", err);
-      });
+  const line = `[${new Date().toISOString()}] ${String(message).slice(0, 8192)}`;
+  state.logs.push(line);
+  if (state.logs.length > 2000) state.logs.splice(0, state.logs.length - 2000);
+  scheduleLogRender();
+  if (!state.paths.appLog || !Neutralino.filesystem?.appendFile) return;
+  const text = line + "\r\n", bytes = new TextEncoder().encode(text).length;
+  while (state.logBuffer.length && state.logBufferBytes + bytes > LOG_MAX_BUFFER_BYTES) {
+    const removed = state.logBuffer.shift(); state.logBufferBytes -= removed.bytes; state.logDropped++;
   }
+  state.logBuffer.push({ text, bytes }); state.logBufferBytes += bytes;
+  if (!state.logFlushTimer) state.logFlushTimer = setTimeout(() => {
+    state.logFlushTimer = null;
+    flushLogBuffer().catch(err => console.error("Log batch failed; retained queue will retry", err));
+  }, LOG_FLUSH_MS);
+}
+
+function scheduleLogRender() {
+  if (state.currentView !== "logs" || !state.surfaceVisible || document.hidden || state.logRenderTimer) return;
+  state.logRenderTimer = setTimeout(() => { state.logRenderTimer = null; if (state.currentView === "logs" && state.surfaceVisible && !document.hidden) renderLogs(); }, 150);
+}
+
+async function rotateLogFile(incomingBytes) {
+  const file = state.paths.appLog;
+  if (state.logFileBytes === null) {
+    try { state.logFileBytes = Number((await Neutralino.filesystem.getStats(file)).size || 0); }
+    catch (err) {
+      if (await access(file)) throw err;
+      state.logFileBytes = 0;
+    }
+    // Preserve the pre-upgrade unbounded log once. Managed .1/.2 rotations below
+    // are new, explicitly bounded logs; never delete the user's old large file.
+    if (state.logFileBytes > LOG_MAX_FILE_BYTES) {
+      const history = await Neutralino.filesystem.getJoinedPath(state.paths.work, "_历史版本");
+      await ensureDirectory(history);
+      await Neutralino.filesystem.move(file, await Neutralino.filesystem.getJoinedPath(history, `smart-proxy-before-bounded-${Date.now()}.log`));
+      state.logFileBytes = 0;
+    }
+  }
+  if (state.logFileBytes + incomingBytes <= LOG_MAX_FILE_BYTES) return;
+  if (await access(file + ".2")) await Neutralino.filesystem.remove(file + ".2");
+  if (await access(file + ".1")) await Neutralino.filesystem.move(file + ".1", file + ".2");
+  if (await access(file)) await Neutralino.filesystem.move(file, file + ".1");
+  state.logFileBytes = 0;
+}
+
+async function flushLogBuffer() {
+  if (state.logFlushBusy) return state.logWriteChain;
+  if (state.logFlushTimer) clearTimeout(state.logFlushTimer);
+  state.logFlushTimer = null;
+  if (!state.logBuffer.length || !state.paths.appLog) return;
+  state.logFlushBusy = true;
+  const batch = state.logBuffer.splice(0), dropped = state.logDropped;
+  state.logBufferBytes = 0; state.logDropped = 0;
+  const prefix = dropped ? `[${new Date().toISOString()}] Log backpressure: ${dropped} queued lines dropped (256 KiB limit)\r\n` : "";
+  if (dropped) console.warn(prefix.trim());
+  const text = prefix + batch.map(item => item.text).join("");
+  const bytes = new TextEncoder().encode(text).length;
+  state.logWriteChain = (async () => {
+    try { await rotateLogFile(bytes); await Neutralino.filesystem.appendFile(state.paths.appLog, text); state.logFileBytes += bytes; }
+    catch (err) { state.logDropped += batch.length + dropped; console.error("Log write failed; dropped batch will be reported on recovery", err); throw err; }
+    finally {
+      state.logFlushBusy = false;
+      if (state.logBuffer.length && !state.logFlushTimer) state.logFlushTimer = setTimeout(() => {
+        state.logFlushTimer = null; flushLogBuffer().catch(err => console.error("Log retry failed", err));
+      }, LOG_FLUSH_MS);
+    }
+  })();
+  return state.logWriteChain;
 }
 
 function filteredLogLines() {
@@ -360,7 +422,7 @@ function filteredLogLines() {
 }
 
 function currentRenderedLogText() {
-  return filteredLogLines().join("\n");
+  return filteredLogLines().slice().reverse().join("\n");
 }
 
 function renderLogs() {
@@ -645,6 +707,8 @@ function writeSettingsToForm() {
     if ($(key)) $(key).value = state.settings[key];
   }
   renderSubscriptionControls();
+  if ($("probeProfile")) $("probeProfile").value = state.settings.benchmarkProfile || "codex";
+  if ($("removeOfflineYamlBtn")) $("removeOfflineYamlBtn").disabled = !state.settings.configPath;
   if ($("autoStartSilent")) $("autoStartSilent").checked = !!state.settings.autoStartSilent;
   if ($("continuousWssAutoSwitchEnabled")) {
     $("continuousWssAutoSwitchEnabled").checked = !!state.settings.continuousWssAutoSwitchEnabled;
@@ -1292,6 +1356,15 @@ async function ensureSingleInstanceOrExit() {
   if (!self || !state.paths.instanceLock) return true;
 
   const lock = await readInstanceJson(state.paths.instanceLock);
+  const handoffArg = (window.NL_ARGS || []).find(arg => /^--handoff-from-pid=\d+$/.test(arg));
+  if (handoffArg) {
+    const previousPid = Number(handoffArg.split("=")[1]);
+    if (!lock || Number(lock.pid) !== previousPid || previousPid === Number(self.pid)) throw new Error("UI handoff rejected: previous owner does not match lock");
+    state.handoffFromPid = previousPid;
+    state.instanceIdentity = { pid: String(self.pid), exe: self.exe };
+    log(`UI handoff candidate for ${previousPid}; old UI and core left running until readiness`);
+    return true;
+  }
 
   if (await isLockedInstanceAlive(lock, self).catch(() => false)) {
     const acknowledged = await signalPrimaryInstance("duplicate-start").catch(() => false);
@@ -1418,9 +1491,11 @@ async function seedBundledPrivateConfig() {
   try {
     manifest = JSON.parse(await Neutralino.resources.readFile(BUNDLED_PRIVATE_CONFIG_MANIFEST));
   }
-  catch {
+  catch (err) {
+    log(`Bundled seed manifest unavailable; existing local configuration retained: ${err.message || err}`);
     return;
   }
+  if (manifest.privateSeedsIncluded === false) log("Public-safe build: no personal configuration embedded; loading existing local user files");
 
   const roots = {
     app: state.paths.appRoot,
@@ -1628,6 +1703,25 @@ function subscriptionNodeKey(profile, node) {
 function offlineYamlSourceName(path) {
   const fileName = String(path || "").split(/[\\/]/).filter(Boolean).pop();
   return fileName ? `离线 YAML · ${fileName}` : "离线 YAML";
+}
+
+async function removeOfflineYamlSource() {
+  if (state.subscriptionBusy || state.codexProbeRunning) throw new Error("请先停止测速或等待订阅操作完成");
+  const previousPath = state.settings.configPath;
+  if (!previousPath) return false;
+  if (!window.confirm("移除离线 YAML 来源？原 YAML 文件会保留，当前代理不会重启或切换节点。")) return false;
+  state.settings.configPath = "";
+  try {
+    await persistSettingsFile();
+    await refreshSubscriptionNodeCatalog();
+  } catch (err) {
+    state.settings.configPath = previousPath;
+    await persistSettingsFile().catch(saveError => log(`Restore offline source failed: ${saveError.message || saveError}`));
+    throw err;
+  }
+  writeSettingsToForm(); renderProxyNodes(); setStatus();
+  log("Offline YAML source removed; original file retained, running core unchanged until next manual start");
+  return true;
 }
 
 async function readOfflineYamlSource(options = {}) {
@@ -2896,21 +2990,18 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function api(baseUrl, secret, path, options) {
-  const res = await fetch(`${baseUrl}${path}`, {
-    ...options,
-    headers: {
-      Authorization: `Bearer ${secret}`,
-      "Content-Type": "application/json",
-      ...((options && options.headers) || {})
-    }
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`${res.status} ${text}`);
-  }
-  if (res.status === 204) return null;
-  return res.json();
+async function api(baseUrl, secret, path, options = {}) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  options.signal?.addEventListener("abort", abort, { once: true });
+  if (options.signal?.aborted) abort();
+  const timer = setTimeout(abort, CONTROLLER_REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${baseUrl}${path}`, { ...options, signal: controller.signal,
+      headers: { Authorization: `Bearer ${secret}`, "Content-Type": "application/json", ...(options.headers || {}) } });
+    if (!res.ok) throw new Error(`${res.status} ${await res.text().catch(() => "")}`);
+    return res.status === 204 ? null : await res.json();
+  } finally { clearTimeout(timer); options.signal?.removeEventListener("abort", abort); }
 }
 
 
@@ -2962,10 +3053,16 @@ async function getMainProxies() {
 }
 
 async function getCurrentMainNode() {
-  const proxies = await getMainProxies();
-  const groups = proxies.proxies || {};
-  const group = findTargetGroup(groups, state.settings.targetGroup);
-  return group && group.now ? resolveFinalNode(groups, group.now) : "-";
+  let name = state.settings.targetGroup || DEFAULT_SETTINGS.targetGroup;
+  const seen = new Set();
+  while (!seen.has(name)) {
+    seen.add(name);
+    const group = await api(mainController(), MAIN_SECRET, `/proxies/${encodeURIComponent(name)}`);
+    if (!group?.now) return name === state.settings.targetGroup ? "-" : name;
+    if (!state.nodes.includes(group.now) && Array.isArray(group.all)) { name = group.now; continue; }
+    return group.now;
+  }
+  throw new Error("Proxy group selection cycle");
 }
 
 function resolveFinalNode(groups, name) {
@@ -3271,72 +3368,20 @@ async function selectCatalogNode(key, options = {}) {
 }
 
 function nodeCodexPresentation(entry, key) {
-  if (!entry && state.codexProbePendingKeys.has(key)) {
-    return { text: "测速中", className: "pending", title: "正在用 Codex 订阅实测 GPT-5.3 Codex Spark tok/s" };
-  }
-  if (!entry) {
-    return {
-      text: "测速",
-      className: "idle",
-      title: "先校验节点出口，再用本机 Codex 订阅的 GPT-5.3 Codex Spark 流式实测 tok/s"
-    };
-  }
-  if (entry.status === "pending" || state.codexProbePendingKeys.has(key)) {
-    const oldTok = Number(entry.tokPerSec || 0);
-    return {
-      text: oldTok > 0 ? oldTok.toFixed(1) + " tok/s" : state.codexProbeCancelRequested && state.codexProbeBusyKey === key ? "停止中" : "测速中",
-      className: "pending",
-      title: oldTok > 0 ? "正在复测；新值成功前继续显示上次 tok/s" : "正在经独立探测通道实测 Codex 订阅流式 tok/s；再次点击可停止"
-    };
-  }
-  if (entry.status === "cancelled") {
-    return { text: "已停止", className: "idle", title: "测试已由用户停止" };
-  }
-  if (entry.status === "error") {
-    const error = String(entry.error || "上传测速失败");
-    return { text: "测速失败", className: "error", title: error };
-  }
-  const gateDetail = (entry) => {
-    if (entry.gateSkipped || !GATE_CHECK_ENABLED) return "可达性检查已禁用，直接测 tok/s";
-    const rounds = Number(entry.gateRounds || 0);
-    const pass = Number(entry.gatePass || 0);
-    const avg = Math.max(1, Math.round(Number(entry.anthropicMs || 0)));
-    const max = Math.round(Number(entry.gateMsMax || 0));
-    return "HTTP " + Number(entry.anthropicHttp || 0)
-      + (rounds ? "，" + pass + "/" + rounds + " 次全过" : "")
-      + "，均 " + avg + " ms" + (max > avg ? " / 峰 " + max + " ms" : "");
-  };
-  if (entry.anthropicOk === true && !(Number(entry.tokPerSec) > 0)) {
-    return {
-      text: entry.gateSkipped || !GATE_CHECK_ENABLED ? "待测" : "可达",
-      className: "medium",
-      title: (entry.gateSkipped || !GATE_CHECK_ENABLED ? gateDetail(entry) : "Claude 可达（" + gateDetail(entry) + "）") + "；尚未实测 tok/s"
-    };
-  }
-  const blocked = entry.anthropicOk === false;
-  const tokPerSec = Number(entry.tokPerSec || 0);
-  const className = blocked ? "blocked" : tokPerSec >= 40 ? "fast" : tokPerSec >= 25 ? "medium" : "slow";
-  const claudeText = blocked
-    ? "Claude 不可达（" + String(entry.error || ("HTTP " + Number(entry.anthropicHttp || 0))) + "）"
-    : "Claude 可达（" + gateDetail(entry) + "）";
-  const endToEndTiming = entry.timingSource === "request-end-to-end-tok";
-  const measuredMs = Math.max(1, Math.round(Number(
-    endToEndTiming ? (entry.tokElapsedMs || entry.tokStreamMs) : entry.tokStreamMs
-  ) || 0));
-  const timingLabel = endToEndTiming
-    ? "端到端有效速度"
-    : "旧口径结果（下次测速将自动覆盖）";
-  const bufferingNote = endToEndTiming && entry.tokStreamBuffered
-    ? "，短流/缓存已按端到端时间纠偏"
-    : "";
-  return {
-    text: blocked ? "Claude 拒绝" : tokPerSec.toFixed(1) + " tok/s",
-    className,
-    title: (entry.resolvedModel ? "解析模型 " + entry.resolvedModel + "；" : "") + timingLabel + " "
-      + Number(entry.tokEst || 0) + " token / " + measuredMs + " ms（首正文 "
-      + Math.max(1, Math.round(Number(entry.tokTtftMs || 0))) + " ms，正文传输 "
-      + Math.max(1, Math.round(Number(entry.tokStreamMs || 0))) + " ms" + bufferingNote + "）；" + claudeText
-  };
+  const tok = Number(entry?.tokPerSec || 0);
+  if (state.codexProbePendingKeys.has(key)) return { text: state.codexProbeCancelRequested ? "停止中" : "测速中", className: "pending", title: "固定模型/账户；历史成绩保留；再次点击可取消" };
+  if (!entry) return { text: "未测", className: "idle", title: "实际 usage / 请求至最后正文耗时；不代表纯模型解码速度或 Claude 可达性" };
+  const attempt = entry.lastAttempt;
+  const stale = attempt && attempt.status !== "done";
+  const scope = { model: "模型/账户", local: "本机探测环境", round: "整轮环境", node: "本次节点请求", measurement: "测量完整性", cancelled: "用户取消" };
+  const detail = stale ? `；最新状态：${scope[attempt.failureScope] || attempt.status}，${attempt.error || "未完成"}` : "";
+  const samples = Number(entry.sampleCount || 0);
+  const quality = entry.verified ? `${entry.successfulSamples}/${samples} 次成功，中位数速度；范围 ${Number(entry.tokMin || 0).toFixed(1)}–${Number(entry.tokMax || 0).toFixed(1)} tok/s`
+    : samples > 1 ? `${entry.successfulSamples}/${samples} 次成功，不稳定，不定冠军` : samples ? "单次初筛，不作为稳定冠军" : "旧口径历史值，不参与新榜单";
+  const measured = entry.measuredAt ? new Date(entry.measuredAt).toLocaleString() : "未知时间";
+  return { text: tok > 0 ? `${tok.toFixed(1)} tok/s${stale ? " 历史" : ""}` : stale ? "本次未通过" : "未测",
+    className: stale || !tok ? "idle" : entry.verified ? "fast" : "medium",
+    title: `${entry.resolvedModel || "未知模型"} / ${entry.probeModelId || "旧账户口径"}；${quality}；端到端有效吞吐（非纯解码速率）；首正文 TTFT中位数 ${Math.round(entry.tokTtftMedianMs || entry.tokTtftMs || 0)} ms；实际 usage ${entry.tokenCountSource === "api-usage" ? entry.tokEst : "未验证"} tokens；测量于 ${measured}${detail}；Anthropic 可达性未测量` };
 }
 
 
@@ -3368,7 +3413,7 @@ async function bundledProbeScriptPath(fileName, label) {
   const resources = await Neutralino.filesystem.getJoinedPath(state.paths.appRoot, "resources");
   const scripts = await Neutralino.filesystem.getJoinedPath(resources, "scripts");
   const direct = await Neutralino.filesystem.getJoinedPath(scripts, fileName);
-  if (await access(direct)) return direct;
+  if ((typeof NL_RESMODE === "undefined" || NL_RESMODE === "directory") && await access(direct)) return direct;
 
   if (!bundledProbeScriptPromises.has(fileName)) {
     const promise = (async () => {
@@ -3607,7 +3652,7 @@ async function runBatchGateScan(items, timeoutSeconds = PROBE_GATE_TIMEOUT_S, re
   if (!usable.length) return new Map();
   if (!GATE_CHECK_ENABLED) {
     return new Map(usable.map((item) => [item.port, {
-      ok: true, http: 0, ms: 0, msMax: 0, passCount: 0, roundCount: 0, gateSkipped: true, error: ""
+      ok: null, http: 0, ms: 0, msMax: 0, passCount: 0, roundCount: 0, gateSkipped: true, error: "Anthropic 可达性未测量"
     }]));
   }
   const rounds = Math.max(1, Math.trunc(Number(repeat) || 1));
@@ -3829,122 +3874,88 @@ async function runTokenMixModelProbe(item) {
 
 // Both models pull from one ordered queue. A node outcome is final; only an explicit
 // model/channel outage requeues that channel's unfinished item for the surviving model.
-async function runBatchTokProbe(items) {
-  const usable = SmartProxyConfig.uniqueCodexProbeItems(
-    items.filter((item) => Number(item.port) > 0),
-    (item) => Number(item.port)
-  );
+async function runBatchTokProbe(items, options = {}) {
+  const usable = SmartProxyConfig.uniqueCodexProbeItems(items.filter(item => Number(item.port) > 0), item => Number(item.port));
   const byPort = new Map();
   if (!usable.length) return byPort;
-  if (state.codexProbeCancelRequested) {
-    for (const item of usable) byPort.set(Number(item.port), tokProbeFailure("node", "测速已停止", { http: 0 }));
-    return byPort;
-  }
-
-  // Neutralino serializes concurrent execCommand calls. Cross that boundary once,
-  // then let the Node helper own every real Codex/curl child and the shared queue.
+  const profile = $("probeProfile")?.value || state.settings.benchmarkProfile || "codex";
   const scriptPath = await dualModelProbeScriptPath();
-  const command = [
-    "node.exe",
-    quote(scriptPath),
-    "--ports",
-    quote(usable.map((item) => Number(item.port)).join(",")),
-    "--tokenmix-key-file",
-    quote(TOKENMIX_TOK_PROBE_KEY_FILE),
-    "--codex-homes-root",
-    quote(CODEX_TOK_PROBE_HOMES_ROOT),
-    "--codex-timeout-seconds",
-    String(CODEX_TOK_PROBE_TIMEOUT_S),
-    "--tokenmix-timeout-seconds",
-    String(TOKENMIX_TOK_PROBE_TIMEOUT_S),
-    "--codex-concurrency",
-    String(CODEX_TOK_PROBE_CONCURRENCY),
-    "--tokenmix-concurrency",
-    String(TOKENMIX_TOK_PROBE_CONCURRENCY),
-    "--tokenmix-process-concurrency",
-    String(TOKENMIX_TOK_PROBE_PROCESS_CONCURRENCY),
-    "--codex-model",
-    quote(CODEX_TOK_PROBE_MODEL),
-    "--tokenmix-model",
-    quote(TOKENMIX_TOK_PROBE_MODEL)
-  ].join(" ");
-  const result = await Neutralino.os.execCommand(command, { cwd: state.paths.work });
-  const lines = String(result.stdOut || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  let payload = null;
-  for (let index = lines.length - 1; index >= 0 && !payload; index -= 1) {
-    try { payload = JSON.parse(lines[index]); }
-    catch { /* ignore non-JSON launcher output */ }
-  }
-  if (!payload || payload.ok !== true || !Array.isArray(payload.outcomes)) {
-    const detail = payload && payload.error
-      || String(result.stdErr || "").trim().split(/\r?\n/)[0]
-      || "dual-model batch helper returned no usable JSON";
-    for (const item of usable) byPort.set(Number(item.port), tokProbeFailure("model", detail, { http: 0 }));
-    return byPort;
-  }
-
-  for (const disabled of payload.disabledModels || []) {
-    log("Tok probe model disabled; " + disabled.modelId
-      + " hands unfinished nodes to the survivor: " + disabled.error);
-  }
-  const activity = payload.activity || {};
-  log("Tok batch helper completed " + payload.outcomes.length + " nodes in "
-    + Math.max(1, Number(payload.elapsedMs) || 0) + "ms; real peak "
-    + Math.max(0, Number(activity.maxActiveTotal) || 0) + " children");
-
-  for (const record of payload.outcomes) {
-    const port = Number(record && record.port);
-    if (!(port > 0) || byPort.has(port)) continue;
-    const value = record && record.value && typeof record.value === "object"
-      ? record.value
-      : tokProbeFailure(record && record.failureScope || "node", "missing node probe result", { http: 0 });
-    byPort.set(port, value.ok === true
-      ? value
-      : tokProbeFailure(record.failureScope || value.failureScope || "node", value.error, value));
-  }
-  for (const item of usable) {
-    const port = Number(item.port);
-    if (!byPort.has(port)) {
-      byPort.set(port, tokProbeFailure("model", "dual-model batch helper omitted this node", { http: 0 }));
-    }
-  }
+  const command = ["node.exe", quote(scriptPath), "--ports", quote(usable.map(item => Number(item.port)).join(",")),
+    "--profile", profile === "tokenmix" ? "tokenmix" : "codex", "--concurrency", "4", "--timeout-seconds", "30",
+    "--tokenmix-key-file", quote(TOKENMIX_TOK_PROBE_KEY_FILE), "--codex-homes-root", quote(CODEX_TOK_PROBE_HOMES_ROOT),
+    "--codex-model", quote(CODEX_TOK_PROBE_MODEL), "--tokenmix-model", quote(TOKENMIX_TOK_PROBE_MODEL)].join(" ");
+  const payload = await new Promise(async (resolve, reject) => {
+    let buffer = "", stderr = "", result = null, settled = false, watchdog = null;
+    const early = [];
+    const job = { proc: null }; state.probeJob = job;
+    const finish = async error => {
+      if (settled) return; settled = true; clearTimeout(watchdog);
+      await Neutralino.events.off("spawnedProcess", onEvent).catch(err => log(`Probe listener cleanup failed: ${err.message || err}`));
+      if (state.probeJob === job) state.probeJob = null;
+      if (error) reject(error); else resolve(result);
+    };
+    const consume = line => {
+      let event; try { event = JSON.parse(line); } catch { if (line.trim()) log("Probe ignored non-JSON output"); return; }
+      if (event.type === "log") log(`Benchmark: ${String(event.message || "").slice(0, 500)}`);
+      if (event.type === "start") { state.lastProbeRoundId = event.roundId || ""; log(`Fixed benchmark ${event.modelId}/${event.model}; global concurrency <=4, preliminary scan + three-sample finalists`); }
+      if (event.type === "progress" && !state.codexProbeCancelRequested) {
+        state.codexProbeCompleted = Number(event.completed || 0); state.codexProbeTotal = Number(event.total || usable.length);
+        if (typeof options.onProgress === "function") options.onProgress(event);
+        renderProxyNodes();
+      }
+      if (event.type === "result") result = event;
+    };
+    const handle = detail => {
+      const action = String(detail.action || detail.event || "");
+      if (action === "stdOut") {
+        buffer += String(detail.data || "");
+        if (buffer.length > 2 * 1024 * 1024) { finish(new Error("Probe output exceeded 2 MiB bound")); return; }
+        let index; while ((index = buffer.indexOf("\n")) >= 0) { consume(buffer.slice(0, index)); buffer = buffer.slice(index + 1); }
+      } else if (action === "stdErr") stderr = (stderr + String(detail.data || "")).slice(-2000);
+      else if (action === "exit") {
+        if (buffer.trim()) consume(buffer);
+        if (!result || result.ok !== true) finish(new Error(result?.error || stderr || `Probe helper exited ${detail.data} without a result`));
+        else finish();
+      }
+    };
+    const onEvent = event => {
+      const detail = event?.detail || {};
+      if (!job.proc) { if (early.length < 64) early.push(detail); return; }
+      if (detail.id === job.proc.id) handle(detail);
+    };
+    try {
+      await Neutralino.events.on("spawnedProcess", onEvent);
+      job.proc = await Neutralino.os.spawnProcess(command, { cwd: state.paths.work });
+      early.filter(detail => detail.id === job.proc.id).forEach(handle);
+      if (state.codexProbeCancelRequested) await requestCodexProbeCancel();
+      // A supervisor bound is not inherited by queued requests. Each curl has its own 30s timeout.
+      if (settled) return;
+      watchdog = setTimeout(async () => {
+        log("Probe supervisor deadline exceeded; cancelling helper without changing node health");
+        await Neutralino.os.updateSpawnedProcess(job.proc.id, "stdIn", '{"action":"cancel"}\n').catch(err => log(`Probe supervisor cancel failed: ${err.message || err}`));
+        setTimeout(() => { if (!settled) { Neutralino.os.updateSpawnedProcess(job.proc.id, "exit").catch(err => log(`Probe helper termination failed: ${err.message || err}`)); finish(new Error("Probe supervisor timeout")); } }, 3000);
+      }, Math.max(120000, (usable.length * 2 + 12) * 32000));
+    } catch (err) { finish(err); }
+  });
+  byPort.roundInfo = payload;
+  if (payload.cancelled || payload.channelFailure) state.lastProbeRoundId = "";
+  for (const record of payload.outcomes || []) byPort.set(Number(record.port), record.value);
+  for (const item of usable) if (!byPort.has(Number(item.port))) byPort.set(Number(item.port), { ok: false, failureScope: "round", error: "本轮未返回节点结果" });
+  log(`Benchmark completed ${byPort.size} nodes in ${payload.elapsedMs}ms; peak ${payload.activity?.maxActiveTotal || 0}; no node switching`);
   return byPort;
 }
 
 // 单节点完整测速：gate 可达性 + tok/s（供手动单测与批量阶段共用的结果组装）
 function buildTokResult(entry, gate, tok) {
-  const base = {
-    status: "ok", successCount: 1, attemptCount: 1, connectionCount: 0,
-    durationMs: Math.max(1, Number(gate && gate.ms) || 1),
-    node: entry.tag || entry.node,
-    anthropicOk: !!(gate && gate.ok),
-    anthropicHttp: Number(gate && gate.http) || 0,
-    anthropicMs: Number(gate && gate.ms) || 0,
-    gatePass: Number(gate && gate.passCount) || 0,
-    gateRounds: Number(gate && gate.roundCount) || 0,
-    gateMsMax: Number(gate && gate.msMax) || 0,
-    uploadMbps: 0, uploadSkipped: true, serverConfirmed: false,
-    timingSource: tok && tok.timingSource || "dual-model-stream-tok", routeVerification: "lane-selector"
-  };
-  if (!base.anthropicOk) return { ...base, error: (gate && gate.error) || "Claude 不可达" };
-  if (!tok) return { ...base, gateOnly: true };
-  if (!tok.ok) return { ...base, status: "error", successCount: 0, error: tok.error || "tok/s 测速失败" };
-  return {
-    ...base,
-    tokPerSec: tok.tokPerSec, tokEst: tok.tokEst,
-    tokTtftMs: tok.ttftMs,
-    tokStreamMs: tok.deliveryStreamMs ?? tok.streamMs,
-    tokElapsedMs: tok.elapsedMs ?? tok.streamMs,
-    tokDeltaCount: tok.deltaCount,
-    tokStreamBuffered: tok.streamBuffered === true,
-    requestedModel: tok.requestedModel || CODEX_TOK_PROBE_MODEL,
-    resolvedModel: tok.resolvedModel || "",
-    resolvedModelVerified: tok.resolvedModelVerified === true,
-    modelVerificationSource: tok.modelVerificationSource || "",
-    probeModelId: tok.probeModelId || "",
-    measuredAt: Date.now(),
-    serverConfirmed: true
-  };
+  const base = { node: entry.tag || entry.node, anthropicOk: gate?.gateSkipped || !gate ? null : gate.ok,
+    gateRounds: gate?.roundCount || 0, gateSkipped: !gate || gate.gateSkipped === true,
+    anthropicHttp: gate?.http || 0, anthropicMs: gate?.ms || 0, routeVerification: "static-node-lane", measuredAt: Date.now() };
+  if (!tok?.ok) return { ...base, status: tok?.failureScope === "cancelled" ? "cancelled" : "error",
+    failureScope: tok?.failureScope || "round", error: tok?.error || "未获得完整测速结果", roundId: tok?.roundId || "" };
+  return { ...base, ...tok, status: "ok", successCount: 1, probeReachable: true,
+    tokTtftMs: tok.ttftMs, tokTtftMedianMs: tok.ttftMedianMs || tok.ttftMs,
+    tokStreamMs: tok.deliveryStreamMs ?? tok.streamMs, tokElapsedMs: tok.elapsedMs ?? tok.streamMs,
+    tokDeltaCount: tok.deltaCount, tokStreamBuffered: tok.streamBuffered === true, serverConfirmed: true };
 }
 
 async function runCodexNetworkProbeAttempt(entry, laneIndex = 0, uploadBytes = 0, probeOptions = {}) {
@@ -3952,11 +3963,9 @@ async function runCodexNetworkProbeAttempt(entry, laneIndex = 0, uploadBytes = 0
   try {
     const proxyPort = probeOptions.proxyPort || probePortForEntry(entry);
     if (!proxyPort) return { status: "error", successCount: 0, node: entry.tag || entry.node, error: "本轮跳过：节点尚无静态探测通道（下次手动启动代理时生效）" };
-    const gate = probeOptions.skipGate ? { ok: true, http: 0, ms: 0 } : await runAnthropicGate(proxyPort);
-    if (!gate.ok || probeOptions.gateOnly) return buildTokResult(entry, gate, null);
-    if (state.codexProbeCancelRequested) return { status: "cancelled", successCount: 0, node: entry.tag || entry.node };
+    if (state.codexProbeCancelRequested) return { status: "cancelled", failureScope: "cancelled", node: entry.tag || entry.node };
     const tokMap = await runBatchTokProbe([{ port: proxyPort }]);
-    return buildTokResult(entry, gate, tokMap.get(proxyPort) || { ok: false, error: "无测速结果" });
+    return buildTokResult(entry, null, tokMap.get(proxyPort) || { ok: false, failureScope: "round", error: "无测速结果" });
   }
   catch (err) {
     return {
@@ -4011,6 +4020,10 @@ function codexSuccessfulCatalogEntries(entries) {
 
 async function requestCodexProbeCancel() {
   state.codexProbeCancelRequested = true;
+  if (state.probeJob?.proc) {
+    try { await Neutralino.os.updateSpawnedProcess(state.probeJob.proc.id, "stdIn", '{"action":"cancel"}\n'); }
+    catch (err) { log(`Probe cancellation delivery failed: ${err.message || err}`); }
+  }
   renderProxyNodes();
 }
 
@@ -4021,7 +4034,11 @@ function storeCodexProbeResult(entry, result) {
   state.nodeCodexResults.set(entry.key, merged);
   state.codexProbePendingKeys.delete(entry.key);
   state.codexProbeLastKey = entry.key;
-  syncCodexProbeStore();
+  const store = state.settings.codexProbeStore || (state.settings.codexProbeStore = { version: 1, updatedAt: 0, results: {} });
+  store.results ||= {};
+  store.results[entry.key] = SmartProxyConfig.normalizeCodexProbeResult(merged);
+  store.updatedAt = Date.now();
+  scheduleSettingsPersist("probe result batch");
   return merged;
 }
 
@@ -4080,244 +4097,66 @@ async function testCodexNode(key) {
 
 
 async function testAllCodexNodes(options = {}) {
-  if (state.codexProbeRunning) {
-    if (state.codexProbeMode !== "single") return requestCodexProbeCancel();
-    throw new Error("单节点 Codex 测试正在运行");
-  }
+  if (state.codexProbeRunning) return requestCodexProbeCancel();
   const benchmarkStartedAt = Date.now();
-  const deferEndpointDnsRefresh = options.forceDns !== true && !options.continuous;
-  // The running core/catalog is the benchmark truth. Re-reading every cached YAML
-  // through Neutralino on every click adds fixed latency without adding testable
-  // nodes; settings/subscription changes already refresh this catalog at source.
   if (!state.subscriptionNodeCatalog.length) await refreshSubscriptionNodeCatalog();
-  const scoped = Array.isArray(options.entries) && options.entries.length ? options.entries : null;
-  const requestedLimit = Math.max(0, Math.trunc(Number(options.limit || 0)));
-  const baseEntries = scoped || state.subscriptionNodeCatalog;
-  let entries = [...baseEntries];
-  if (!entries.length) throw new Error("没有可测试的订阅或离线 YAML 缓存节点");
   await ensureCodexProbeReady();
-  // catalog 可能已含新订阅节点而 core 仍是旧配置;只测 core 里真实存在的节点
-  const liveGroup = await api(
-    mainController(),
-    MAIN_SECRET,
-    "/proxies/" + encodeURIComponent(state.settings.targetGroup || DEFAULT_SETTINGS.targetGroup)
-  ).catch(() => null);
-  const liveTags = new Set(liveGroup && Array.isArray(liveGroup.all) ? liveGroup.all.map(String) : []);
-  if (liveTags.size) {
-    const testable = entries.filter((entry) => liveTags.has(String(entry.tag || entry.node)));
-    if (testable.length < entries.length) {
-      log(`Probe skips ${entries.length - testable.length} catalog nodes not in running core; they apply on the next manual proxy start`);
-    }
-    if (testable.length) entries = testable;
-  }
-  entries = SmartProxyConfig.uniqueCodexProbeItems(entries, (entry) => {
-    const port = probePortForEntry(entry);
-    return port > 0 ? `port:${port}` : `key:${entry && (entry.key || entry.tag || entry.node) || ""}`;
-  });
-  await ensureProbeAssets();
-
+  const scoped = Array.isArray(options.entries) && options.entries.length ? options.entries : null;
+  let entries = SmartProxyConfig.uniqueCodexProbeItems(scoped || state.subscriptionNodeCatalog, entry => entry.key);
+  if (!entries.length) throw new Error("没有可测试的节点");
+  const liveGroup = await api(mainController(), MAIN_SECRET, "/proxies/" + encodeURIComponent(state.settings.targetGroup || DEFAULT_SETTINGS.targetGroup));
+  if (!Array.isArray(liveGroup?.all)) throw new Error("本机控制器未返回有效节点组；不修改节点成绩");
+  const liveTags = new Set(liveGroup.all.map(String));
+  const testable = entries.filter(entry => liveTags.has(String(entry.tag || entry.node)) && probePortForEntry(entry) > 0);
+  if (testable.length !== entries.length) log(`Benchmark skipped ${entries.length - testable.length} nodes without active lanes; not marked unreachable`);
+  entries = SmartProxyConfig.rankCodexProbeEntries(testable, state.nodeCodexResults);
+  const limit = Math.max(0, Math.trunc(Number(options.limit || 0)));
+  if (limit) entries = entries.slice(0, limit);
+  if (!entries.length) throw new Error("没有当前内核可测的节点；配置将在下次手动启动代理时生效");
   state.codexProbeRunning = true;
   state.codexProbeMode = options.continuous ? "continuous" : scoped ? "group" : "all";
-  state.codexProbeBusyKey = "";
-  state.codexProbeCompleted = 0;
-  state.codexProbeTotal = entries.length;
-  state.codexProbeCancelRequested = false;
-  const uploadStages = options.uploadStages !== false;
-  entries = SmartProxyConfig.rankCodexProbeEntries(entries, state.nodeCodexResults);
-  if (requestedLimit) entries = entries.slice(0, requestedLimit);
-  renderProxyNodes();
-
+  state.codexProbeCancelRequested = false; state.codexProbeCompleted = 0; state.codexProbeTotal = entries.length;
+  entries.forEach(markCodexProbePending); renderProxyNodes();
+  const byPort = new Map(entries.map(entry => [probePortForEntry(entry), entry]));
   try {
-    // 入口域名先批量解析（几秒），死入口下的节点直接判死，不浪费测速时间
-    if (!deferEndpointDnsRefresh) {
-      await refreshEndpointDnsHealth({ force: options.forceDns === true });
-    }
-    const deadEntries = entries.filter((entry) => entryEndpointDead(entry));
-    if (deadEntries.length) {
-      deadEntries.forEach((entry) => storeCodexProbeResult(entry, {
-        status: "done", anthropicOk: false, anthropicHttp: 0, endpointDead: true,
-        node: entry.tag || entry.node, uploadMbps: 0, delayMs: 0,
-        error: `入口域名无法解析：${entryServerHost(entry)}`
-      }));
-      entries = entries.filter((entry) => !entryEndpointDead(entry));
-      state.codexProbeTotal = entries.length;
-      log(`Probe skips ${deadEntries.length} node(s) on unresolvable entry hosts`);
-      renderProxyNodes();
-      if (!entries.length) {
-        log("Probe aborted: every candidate node sits on an unresolvable entry host");
-        return { total: 0, successful: 0, reachable: 0, finalists: 0, verified: 0 };
+    const tokMap = await runBatchTokProbe(entries.map(entry => ({ port: probePortForEntry(entry) })), {
+      onProgress: event => {
+        const entry = byPort.get(Number(event.port));
+        if (!entry) return;
+        state.codexProbeBusyKey = entry.key;
+        // Show progress without prematurely replacing durable results. The final
+        // outcome may still be an account, environment, or cancellation failure.
       }
-    }
-    // 阶段 1：全量严格 gate 扫描。
-    // 【2026-08-14 改】原来用内核 clash /group/delay：它只要 TCP+HTTP 有任何
-    // 响应就算通过（403、运营商假页同样算），且只测一次。实测该判据与真实
-    // 对话表现脱节——台湾06 IEPL、美国03 IEPL 在它眼里都"可达"，真实 Claude
-    // 连接错误率却是 65.4% / 37.9%。现改为经各节点探测通道发真实 Messages API
-    // 请求，400/401 + Anthropic body + 连测 3 次全过才算可达（详见 runBatchGateScan）。
-    const gateStartedAt = Date.now();
-    entries.forEach(markCodexProbePending);
-    renderProxyNodes();
-    const gateItems = entries
-      .map((entry) => ({ entry, port: probePortForEntry(entry) }))
-      .filter((item) => item.port > 0);
-    const gateByPort = await runBatchGateScan(gateItems.map((item) => ({ port: item.port })));
-    const gateOutcomeByKey = new Map();
-    const currentTokSuccessKeys = new Set();
-    for (const item of gateItems.length ? gateItems : []) {
-      const entry = item.entry;
-      const previous = state.nodeCodexResults.get(entry.key);
-      const gate = gateByPort.get(item.port) || { ok: false, http: 0, ms: 0, passCount: 0, roundCount: GATE_REPEAT_BATCH, error: "无探测结果" };
-      gateOutcomeByKey.set(entry.key, gate);
-      const base = {
-        status: "ok", successCount: 1, attemptCount: 1, connectionCount: 0,
-        durationMs: gate.ms || 1,
-        node: entry.tag || entry.node,
-        anthropicOk: gate.ok, anthropicHttp: gate.http, anthropicMs: gate.ms,
-        gatePass: gate.passCount, gateRounds: gate.roundCount, gateMsMax: gate.msMax || 0,
-        gateSkipped: !!gate.gateSkipped,
-        delayMs: gate.ms,
-        uploadSkipped: true, gateOnly: true, serverConfirmed: false,
-        uploadMbps: 0, uploadBytes: 0, uploadMs: 0, rttMs: gate.ms, connectMs: 0,
-        timingSource: "strict-gate-anthropic", routeVerification: "lane-selector",
-        error: gate.ok ? "" : gate.error
-      };
-      const keepSpeed = !uploadStages && gate.ok
-        && previous && previous.status === "done" && Number(previous.tokPerSec) > 0;
-      storeCodexProbeResult(entry, keepSpeed
-        ? { ...previous, anthropicOk: true, anthropicMs: gate.ms, delayMs: gate.ms, gatePass: gate.passCount, gateRounds: gate.roundCount }
-        : base);
-      state.codexProbeCompleted += 1;
-    }
-    for (const entry of entries) {
-      if (state.codexProbePendingKeys.has(entry.key)) {
-        gateOutcomeByKey.set(entry.key, { ok: false, http: 0, ms: 0, passCount: 0, roundCount: 0 });
-        storeCodexProbeResult(entry, {
-          status: "ok", successCount: 0, node: entry.tag || entry.node,
-          anthropicOk: false, anthropicHttp: 0, anthropicMs: 0, gateOnly: true,
-          error: "本轮跳过：节点尚无静态探测通道（下次手动启动代理时生效）"
-        });
-        state.codexProbeCompleted += 1;
-      }
-    }
-    log(GATE_CHECK_ENABLED
-      ? `Strict gate scan finished in ${((Date.now() - gateStartedAt) / 1000).toFixed(1)}s (${GATE_REPEAT_BATCH} rounds)`
-      : `Gate check disabled: ${gateItems.length} nodes go straight to tok/s stage`);
-    renderProxyNodes();
-    const reachable = state.codexProbeCancelRequested
-      ? []
-      : entries.filter((entry) => gateOutcomeByKey.get(entry.key)?.ok === true);
-    log(`Gate scan complete: ${reachable.length}/${entries.length} Claude reachable`);
-    if (!uploadStages) {
-      const successfulGate = entries.filter((entry) => state.nodeCodexResults.get(entry.key)?.status === "done").length;
-      return { total: entries.length, successful: successfulGate, reachable: reachable.length, finalists: 0, verified: 0 };
-    }
-
-    // 阶段 2：按上次榜单顺序进入动态共享队列。三个 Codex 账户与 TokenMix
-    // 同时领取不同节点；任一账户/通道失败后，其余健康链路接管整轮剩余队列。
-    state.codexProbeTotal = entries.length + reachable.length;
-    reachable.forEach((entry) => {
-      state.codexProbeBusyKey = entry.key;
-      markCodexProbePending(entry);
     });
-    renderProxyNodes();
-    const tokMap = state.codexProbeCancelRequested
-      ? new Map()
-      : await runBatchTokProbe(reachable.map((entry) => ({ port: probePortForEntry(entry) })));
-    let tokModelFailureCount = 0;
-    for (const entry of reachable) {
-      const gate = gateOutcomeByKey.get(entry.key) || { ok: false, http: 0, ms: 0, passCount: 0, roundCount: 0 };
-      const tok = tokMap.get(probePortForEntry(entry))
-        || { ok: false, failureScope: "model", error: "无测速结果" };
-      if (tok.ok !== true && String(tok.failureScope || "model") === "model") {
-        tokModelFailureCount += 1;
-      }
-      const result = buildTokResult(entry, gate, tok);
-      const stored = storeCodexProbeResult(entry, { ...result, delayMs: gate.ms || result.anthropicMs });
-      if (tok.ok === true && result.resolvedModelVerified === true && Number(result.tokPerSec || 0) > 0) {
-        currentTokSuccessKeys.add(entry.key);
-      }
+    const currentKeys = new Set(), gates = new Map();
+    let failed = 0;
+    for (const entry of entries) {
+      const value = state.codexProbeCancelRequested ? { ok: false, failureScope: "cancelled", error: "测速已停止" }
+        : tokMap.get(probePortForEntry(entry));
+      const result = buildTokResult(entry, null, value);
+      const stored = storeCodexProbeResult(entry, result);
+      if (result.status === "ok") currentKeys.add(entry.key); else failed++;
+      gates.set(entry.key, { ok: null });
       if (typeof options.onResult === "function") await options.onResult(entry, stored);
-      if (result.status === "error") {
-        log(`Tok probe node failed once (old tok/s cleared, no cross-model retry): ${entry.subscriptionName}/${entry.node} - ${result.error || "unknown error"}`);
-      }
-      state.codexProbeCompleted += 1;
+      if (result.status === "error") log(`Benchmark ${result.failureScope} failure; previous success retained: ${entry.node} - ${result.error}`);
     }
-    renderProxyNodes();
-
-    // 排名：跨模型时按各自本轮 tok/s 中位数归一化；单模型或样本不足时回退原始 tok/s。
-    // 页面与日志仍展示真实的端到端 tok/s，归一化只决定名次。
-    const verifiedRanked = SmartProxyConfig.rankCurrentCodexProbeEntries(
-      entries,
-      state.nodeCodexResults,
-      gateOutcomeByKey,
-      currentTokSuccessKeys
-    )
-      .map((entry) => ({ entry, result: state.nodeCodexResults.get(entry.key) }))
-      .filter((item) => item.result);
-    const finalists = verifiedRanked.filter((item) => Number(item.result.tokPerSec || 0) > 0);
-    const shouldSwitchWinner = options.autoSwitchWinner === true
-      && !options.continuous
-      && !state.codexProbeCancelRequested
-      && tokModelFailureCount === 0;
-    if (!state.codexProbeCancelRequested) {
-      const winner = verifiedRanked[0] || null;
-      const runnerUp = verifiedRanked[1] || null;
-      if (winner) state.nodeCodexResults.set(winner.entry.key, { ...winner.result, leaguePlace: 1 });
-      if (runnerUp) state.nodeCodexResults.set(runnerUp.entry.key, { ...runnerUp.result, leaguePlace: 2 });
-      if (winner) {
-        log("Codex league winner: "
-          + (scoped ? "[group] " : "")
-          + winner.entry.subscriptionName + "/" + winner.entry.node + " "
-          + Number(winner.result.tokPerSec || 0).toFixed(1) + " tok/s");
-        if (shouldSwitchWinner) {
-          const winnerTag = winner.entry.tag || winner.entry.node;
-          const switched = await switchToNode(winnerTag, "Manual benchmark winner", {
-            manual: true,
-            manualProbeWinner: true,
-            resetConnections: true
-          }).catch((err) => {
-            log(`Manual benchmark winner switch failed: ${err.message || err}`);
-            return false;
-          });
-          log(switched
-            ? `Manual benchmark completed; fastest node selected: ${winnerTag}`
-            : `Manual benchmark completed; fastest node could not be selected: ${winnerTag}`);
-        }
-        else if (options.autoSwitchWinner === true && tokModelFailureCount > 0) {
-          log(`Manual benchmark winner not selected: ${tokModelFailureCount} node(s) remain unfinished because every model channel became unavailable`);
-        }
-      }
-    }
-
-    const successful = entries.filter((entry) => state.nodeCodexResults.get(entry.key)?.status === "done").length;
+    const verifiedRanked = state.codexProbeCancelRequested || tokMap.roundInfo?.channelFailure ? []
+      : SmartProxyConfig.rankCurrentCodexProbeEntries(entries, state.nodeCodexResults, gates, currentKeys);
+    const winner = verifiedRanked[0];
+    if (winner) log(`Benchmark candidate verified with >=3 successful samples: ${winner.node}; selection and connections unchanged`);
+    else log("Benchmark has no comparable three-sample winner; selection and connections unchanged");
     const benchmarkElapsedMs = Math.max(1, Date.now() - benchmarkStartedAt);
-    log((state.codexProbeCancelRequested
-      ? "Codex bulk probe stopped: " + state.codexProbeCompleted + "/" + state.codexProbeTotal
-      : "Codex league round complete: " + successful + "/" + entries.length
-        + " successful, " + reachable.length + " reachable, " + verifiedRanked.length + "/" + finalists.length + " finalists verified")
-      + ` in ${(benchmarkElapsedMs / 1000).toFixed(3)}s`);
-    return {
-      total: entries.length,
-      successful,
-      reachable: reachable.length,
-      finalists: finalists.length,
-      verified: verifiedRanked.length,
-      modelFailures: tokModelFailureCount,
-      elapsedMs: benchmarkElapsedMs
-    };
-  }
-  finally {
-    state.codexProbeRunning = false;
-    state.codexProbeMode = "";
-    state.codexProbeBusyKey = "";
-    state.codexProbeCancelRequested = false;
-    state.codexProbePendingKeys.clear();
-    renderProxyNodes();
-    if (deferEndpointDnsRefresh) {
-      setTimeout(() => {
-        refreshEndpointDnsHealth().catch((err) => log(`Background endpoint DNS check failed: ${err.message || err}`));
-      }, 0);
-    }
+    log(`Benchmark completed: ${currentKeys.size}/${entries.length} measured, ${verifiedRanked.length} fully sampled finalists, ${failed} unfinished/failed, ${(benchmarkElapsedMs / 1000).toFixed(1)}s`);
+    return { total: entries.length, successful: currentKeys.size, reachable: currentKeys.size,
+      finalists: verifiedRanked.length, verified: verifiedRanked.length, modelFailures: tokMap.roundInfo?.channelFailure ? failed : 0,
+      cancelled: state.codexProbeCancelRequested, elapsedMs: benchmarkElapsedMs };
+  } catch (err) {
+    log(`Benchmark infrastructure failure; existing scores retained: ${err.message || err}`);
+    for (const entry of entries) storeCodexProbeResult(entry, { status: "error", failureScope: "local", error: String(err.message || err) });
+    throw err;
+  } finally {
+    state.codexProbeRunning = false; state.codexProbeMode = ""; state.codexProbeBusyKey = "";
+    state.codexProbeCancelRequested = false; state.codexProbePendingKeys.clear(); renderProxyNodes();
   }
 }
 
@@ -4326,7 +4165,7 @@ async function testCodexGroup(subscriptionId) {
   if (state.codexProbeRunning) return requestCodexProbeCancel();
   const entries = catalogEntriesForSubscription(subscriptionId);
   if (!entries.length) throw new Error("该订阅暂无缓存节点");
-  return testAllCodexNodes({ entries, autoSwitchWinner: true });
+  return testAllCodexNodes({ entries });
 }
 
 function stopContinuousCompetition(reason = "disabled") {
@@ -4429,13 +4268,10 @@ function entryServerHost(entry) {
 }
 
 function endpointDead(host) {
-  const until = state.deadEndpoints.get(String(host || ""));
-  if (!until) return false;
-  if (until <= Date.now()) {
-    state.deadEndpoints.delete(String(host || ""));
-    return false;
-  }
-  return true;
+  // System DNS is a different resolver from the core. Its diagnostics can never
+  // blacklist a route (including stale entries from a previous application load).
+  state.deadEndpoints.delete(String(host || ""));
+  return false;
 }
 
 function entryEndpointDead(entry) {
@@ -4456,35 +4292,30 @@ async function refreshEndpointDnsHealth(options = {}) {
     const list = hosts.map((host) => psQuote(host)).join(",");
     const script = `$ErrorActionPreference='SilentlyContinue';`
       + `$out=@();foreach($h in @(${list})){`
-      + `$r=Resolve-DnsName -Name $h -Type A -DnsOnly -ErrorAction SilentlyContinue;`
+      + `$r=@(Resolve-DnsName -Name $h -Type A -DnsOnly -QuickTimeout -ErrorAction SilentlyContinue);`
+      + `$r+=@(Resolve-DnsName -Name $h -Type AAAA -DnsOnly -QuickTimeout -ErrorAction SilentlyContinue);`
       + `$out+=[PSCustomObject]@{h=$h;ok=[bool]($r | Where-Object { $_.IPAddress })}}`
       + `$out | ConvertTo-Json -Compress`;
     const result = await Neutralino.os.execCommand(buildPowerShellExecCommand(script));
     const raw = String(result && result.stdOut || "").trim();
-    if (!raw) return null;
+    if (!raw) { log("Endpoint DNS diagnostic returned no data; no node state changed"); return null; }
     const parsed = JSON.parse(raw);
     const rows = Array.isArray(parsed) ? parsed : [parsed];
     const dead = [];
     for (const row of rows) {
       const host = String(row && row.h || "");
       if (!host) continue;
-      if (row && row.ok) state.deadEndpoints.delete(host);
-      else {
-        state.deadEndpoints.set(host, Date.now() + ENDPOINT_DEAD_TTL_MS);
-        dead.push(host);
-      }
+      state.deadEndpoints.delete(host);
+      if (!row.ok) dead.push(host);
     }
     state.endpointDnsCheckedAt = Date.now();
     const affected = state.subscriptionNodeCatalog.filter((entry) => entryEndpointDead(entry)).length;
     if (dead.length) {
-      log(`Endpoint DNS check: ${dead.length}/${hosts.length} entry host(s) unresolvable -> ${affected}/${state.subscriptionNodeCatalog.length} nodes unusable (${dead.map((host) => host.slice(0, 28)).join(", ")})`);
+      log(`System DNS advisory: ${dead.length}/${hosts.length} hosts unresolved; core uses its own resolver, no nodes blocked and no automatic subscription update`);
     }
     else log(`Endpoint DNS check: all ${hosts.length} entry host(s) resolve`);
     renderProxyNodes();
-    // 入口大面积失效说明订阅本身过期了，自动拉新配置（不在本函数内阻塞）
-    if (dead.length && !options.skipAutoRecover) {
-      autoRecoverFromEndpointFailure(dead).catch((err) => log(`Auto-recover error: ${err.message || err}`));
-    }
+    // DNS-only evidence must not alter subscriptions, node health, or the running core.
     return { hosts: hosts.length, dead: dead.length, affected };
   }
   catch (err) {
@@ -4878,11 +4709,9 @@ function renderProxyNodes() {
     state.nodeGroupCollapseReady = true;
   }
 
-  const globalBestEntry = SmartProxyConfig.rankCodexProbeEntries(entries, state.nodeCodexResults)
-    .find((entry) => {
-      const result = resultOf(entry);
-      return result && result.status === "done" && result.anthropicOk === true && Number(result.tokPerSec || 0) > 0;
-    }) || null;
+  const currentEntries = entries.filter(entry => resultOf(entry)?.roundId && resultOf(entry).roundId === state.lastProbeRoundId);
+  const globalBestEntry = SmartProxyConfig.rankCurrentCodexProbeEntries(currentEntries, state.nodeCodexResults,
+    new Map(currentEntries.map(entry => [entry.key, { ok: null }])), new Set(currentEntries.map(entry => entry.key)))[0] || null;
   const globalBestKey = globalBestEntry ? globalBestEntry.key : "";
 
   box.innerHTML = groups.length
@@ -4890,11 +4719,11 @@ function renderProxyNodes() {
       const sorted = SmartProxyConfig.rankCodexProbeEntries(group.entries, state.nodeCodexResults);
       const reachable = group.entries.filter((entry) => {
         const result = resultOf(entry);
-        return result && result.status === "done" && result.anthropicOk === true;
+        return result && result.status === "done" && Number(result.tokPerSec) > 0 && (!result.lastAttempt || result.lastAttempt.status === "done");
       }).length;
       const blocked = group.entries.filter((entry) => {
         const result = resultOf(entry);
-        return result && result.status === "done" && result.anthropicOk === false;
+        return !!result?.lastAttempt && !["done", "cancelled"].includes(result.lastAttempt.status);
       }).length;
       const groupRunning = state.codexProbeRunning && state.codexProbeMode === "group"
         && group.entries.some((entry) => entry.key === state.codexProbeBusyKey || state.codexProbePendingKeys.has(entry.key));
@@ -4921,18 +4750,18 @@ function renderProxyNodes() {
         }
         else if (result) {
           if (result.status === "pending") { dot = "busy"; metric = "测速中"; metricClass = "busy"; }
-          else if (result.status === "done" && result.anthropicOk === false) {
-            dot = "bad";
-            metric = result.endpointDead ? "入口失效"
-              : result.anthropicHttp ? `拒 ${result.anthropicHttp}` : "不可达";
-            metricClass = "bad";
+          else if (result.lastAttempt && result.lastAttempt.status !== "done") {
+            dot = "idle";
+            const history = Number(result.tokPerSec || 0);
+            metric = (history > 0 ? `${history.toFixed(1)} tok/s 历史 · ` : "") + (result.lastAttempt.status === "cancelled" ? "已停止" : "本次未通过");
+            metricClass = "muted";
           }
-          else if (result.status === "done" && result.anthropicOk === true) {
+          else if (result.status === "done" && Number(result.tokPerSec) > 0) {
             dot = "ok";
             const delay = Number(result.delayMs || result.anthropicMs || 0);
             const tok = Number(result.tokPerSec || 0);
             if (tok > 0) {
-              metric = tok.toFixed(1) + " tok/s" + (delay > 0 ? ` · ${delay} ms` : "");
+              metric = tok.toFixed(1) + " tok/s · " + (result.verified ? `${result.successfulSamples}/${result.sampleCount} 次` : result.sampleCount > 1 ? `${result.successfulSamples}/${result.sampleCount} 不稳定` : result.sampleCount ? "初筛" : "旧口径");
               metricClass = tok >= 40 ? "fast" : tok >= 25 ? "medium" : "slow";
             }
             else if (delay > 0) {
@@ -4945,7 +4774,7 @@ function renderProxyNodes() {
           else { metric = "已停止"; }
         }
         const codex = nodeCodexPresentation(result, entry.key);
-        const tag = current ? "当前" : prepared ? "已准备" : fastest ? "最快" : "";
+        const tag = current ? "当前" : prepared ? "已准备" : fastest ? "本轮候选" : "";
         return `
           <div class="node-row ${current || prepared ? "current" : ""} ${result && result.anthropicOk === false ? "blocked" : ""}" data-select-node="${escapeHtml(entry.node)}" data-node-key="${escapeHtml(entry.key)}" title="${escapeHtml(`${entry.subscriptionName} / ${entry.node}`)}&#10;${escapeHtml(codex.title)}">
             <span class="node-dot ${dot}"></span>
@@ -4991,19 +4820,19 @@ function renderProxyNodes() {
   else {
     const reachableTotal = entries.filter((entry) => {
       const result = resultOf(entry);
-      return result && result.status === "done" && result.anthropicOk === true;
+      return result && result.status === "done" && Number(result.tokPerSec) > 0 && (!result.lastAttempt || result.lastAttempt.status === "done");
     }).length;
     const blockedTotal = entries.filter((entry) => {
       const result = resultOf(entry);
-      return result && result.status === "done" && result.anthropicOk === false;
+      return !!result?.lastAttempt && !["done", "cancelled"].includes(result.lastAttempt.status);
     }).length;
     const guard = state.nodeGuardLast;
     const guardText = guard ? ` · 守护${guard.ok ? "正常" : "告警"} ${Math.max(0, Math.round((Date.now() - guard.at) / 1000))}s 前` : "";
     const globalBestResult = globalBestEntry ? resultOf(globalBestEntry) : null;
     const bestText = globalBestEntry && globalBestResult
-      ? ` · 最快 ${globalBestEntry.subscriptionName}/${globalBestEntry.node} ${Number(globalBestResult.tokPerSec).toFixed(1)} tok/s`
+      ? ` · 本轮复测候选 ${globalBestEntry.subscriptionName}/${globalBestEntry.node} ${Number(globalBestResult.tokPerSec).toFixed(1)} tok/s`
       : "";
-    summaryBox.textContent = `${entries.length} 节点 · 可达 ${reachableTotal} · 拒 ${blockedTotal}${bestText}${guardText}`;
+    summaryBox.textContent = `${entries.length} 节点 · 有成绩 ${reachableTotal} · 本次未通过 ${blockedTotal}${bestText}${guardText} · 测速不切节点`;
   }
 }
 
@@ -5016,46 +4845,27 @@ function escapeHtml(value) {
 }
 
 async function refreshConnections() {
+  if (state.connectionRefreshPromise) return state.connectionRefreshPromise;
   if (!state.mainProcess) {
-    $("connRows").innerHTML = `<tr><td colspan="6">主核心未启动</td></tr>`;
+    if (state.currentView === "connections" && !document.hidden) $("connRows").innerHTML = `<tr><td colspan="6">主核心未启动</td></tr>`;
     return;
   }
-  try {
-    const data = await api(mainController(), MAIN_SECRET, "/connections", { method: "GET" });
-    state.connections = data.connections || [];
-    state.mainHealthFailures = 0;
-    logNewConnections(state.connections);
-    renderConnections();
-    await updateCurrentNode();
-  }
-  catch (err) {
-    $("connRows").innerHTML = `<tr><td colspan="6">读取失败：${escapeHtml(err.message || err)}</td></tr>`;
-    state.mainHealthFailures += 1;
-    if (
-      state.mainHealthFailures >= 3
-      && state.mainCoreDesired
-      && !state.mainStartPromise
-      && !state.mainHealthRecoveryPending
-      && !state.closing
-    ) {
-      const stale = state.mainProcess;
-      state.mainProcess = null;
-      state.mainCoreReady = false;
-      state.mainHealthRecoveryPending = true;
-      setStatus();
-      log("Main core health check failed 3 times; automatic recovery started");
-      Promise.resolve()
-        .then(() => killProcess(stale, "Unhealthy main core"))
-        .then(() => startMainCore({ reason: "health-check" }))
-        .catch((recoveryError) => {
-          log(`Main core health recovery failed: ${recoveryError.message || recoveryError}`);
-        })
-        .finally(() => {
-          state.mainHealthFailures = 0;
-          state.mainHealthRecoveryPending = false;
-        });
+  state.connectionRefreshPromise = (async () => {
+    try {
+      const data = await api(mainController(), MAIN_SECRET, "/connections", { method: "GET" });
+      state.connections = data.connections || []; state.mainHealthFailures = 0;
+      logNewConnections(state.connections); renderConnections();
+      if (Date.now() - state.lastCurrentNodeCheckAt >= 15000) {
+        state.lastCurrentNodeCheckAt = Date.now(); await updateCurrentNode();
+      }
+    } catch (err) {
+      if (state.currentView === "connections" && !document.hidden) $("connRows").innerHTML = `<tr><td colspan="6">读取失败：${escapeHtml(err.message || err)}</td></tr>`;
+      state.mainHealthFailures++;
+      if (state.mainHealthFailures % 3 === 0) log(`Controller unavailable for ${state.mainHealthFailures} polls; proxy not restarted on control-plane evidence alone: ${err.message || err}`);
     }
-  }
+  })();
+  try { return await state.connectionRefreshPromise; }
+  finally { state.connectionRefreshPromise = null; }
 }
 
 function connectionKey(c) {
@@ -5118,11 +4928,12 @@ function logNewConnections(conns) {
 }
 
 function renderConnections() {
+  if (state.currentView !== "connections" || !state.surfaceVisible || document.hidden) return;
   const q = ($("connFilter") && $("connFilter").value.trim().toLowerCase()) || "";
   const all = state.connections || [];
   const conns = (q ? all.filter((c) => connectionSearchText(c).includes(q)) : all).slice(0, 300);
   $("connSummary").textContent = `${conns.length}/${all.length} active connections`;
-  $("connRows").innerHTML = conns.length ? conns.map((c) => {
+  const html = conns.length ? conns.map((c) => {
     const meta = c.metadata || {};
     const processPath = connectionProcessPath(c);
     const host = meta.host || meta.destinationIP || "-";
@@ -5139,6 +4950,7 @@ function renderConnections() {
       </tr>
     `;
   }).join("") : `<tr><td colspan="6">暂无连接</td></tr>`;
+  if (html !== state.lastConnectionsHtml) { $("connRows").innerHTML = html; state.lastConnectionsHtml = html; }
 }
 
 function formatBytes(bytes) {
@@ -5149,17 +4961,21 @@ function formatBytes(bytes) {
 
 function startConnectionPolling() {
   stopConnectionPolling();
-  state.mainHealthFailures = 0;
-  refreshConnections();
-  state.connTimer = setInterval(refreshConnections, 2000);
+  const generation = state.connectionPollGeneration;
+  const tick = async () => {
+    await refreshConnections();
+    if (generation !== state.connectionPollGeneration || !state.mainProcess || state.closing) return;
+    const visible = state.surfaceVisible && state.currentView === "connections" && !document.hidden;
+    state.connTimer = setTimeout(tick, visible ? 2000 : 15000);
+  };
+  tick().catch(err => log(`Connection poll failed: ${err.message || err}`));
 }
 
 function stopConnectionPolling() {
-  if (state.connTimer) clearInterval(state.connTimer);
-  state.connTimer = null;
-  state.mainHealthFailures = 0;
-  state.connections = [];
-  renderConnections();
+  state.connectionPollGeneration++;
+  if (state.connTimer) clearTimeout(state.connTimer);
+  state.connTimer = null; state.mainHealthFailures = 0;
+  state.connections = []; state.lastConnectionsHtml = ""; renderConnections();
 }
 
 function switchView(view) {
@@ -5231,6 +5047,12 @@ async function bindEvents() {
     btn.addEventListener("click", () => switchView(btn.dataset.view));
   });
   $("pickConfigBtn").addEventListener("click", pickConfig);
+  $("removeOfflineYamlBtn")?.addEventListener("click", () => removeOfflineYamlSource().catch(err => log(`Remove offline YAML failed: ${err.message || err}`)));
+  $("probeProfile")?.addEventListener("change", () => {
+    state.settings.benchmarkProfile = $("probeProfile").value === "tokenmix" ? "tokenmix" : "codex";
+    scheduleSettingsPersist("benchmark profile");
+    log(`Benchmark profile selected: ${state.settings.benchmarkProfile}; next round uses one fixed channel`);
+  });
   $("refreshSubBtn").addEventListener("click", () => refreshSubscription().catch((err) => log(`Refresh subscription failed: ${err.message || err}`)));
   $("pickCoreBtn").addEventListener("click", pickCore);
   $("homeSubscriptionUrl").addEventListener("input", () => syncSubscriptionInputs("homeSubscriptionUrl"));
@@ -5325,7 +5147,7 @@ async function bindEvents() {
       .then(renderProxyNodes)
       .catch((err) => log(`Manual select failed: ${err.message || err}`));
   });
-  $("testAllCodexBtn").addEventListener("click", () => testAllCodexNodes({ autoSwitchWinner: true })
+  $("testAllCodexBtn").addEventListener("click", () => testAllCodexNodes()
     .catch((err) => {
       log(`Codex bulk probe failed: ${err.message || err}`);
       if ($("nodeScoreSummary")) $("nodeScoreSummary").textContent = `Codex 全测失败：${err.message || err}`;
@@ -5406,6 +5228,8 @@ async function showMainWindow(reason = "user") {
   }
   catch (_err) { /* 位置读取失败不阻塞显示 */ }
   await Neutralino.window.show();
+  state.surfaceVisible = true;
+  renderConnections(); scheduleLogRender();
   if (typeof Neutralino.window.unminimize === "function") await Neutralino.window.unminimize();
   await Neutralino.window.focus();
   // WebView2 从隐藏转显示时合成器可能不重绘（纯白窗口）；尺寸微扰强制重新合成
@@ -5469,8 +5293,9 @@ async function reloadAppSurface(reason = "user") {
       clearInterval(state.nodeGuardTimer);
       state.nodeGuardTimer = null;
     }
-    state.codexProbeCancelRequested = true;
-    await saveSettingsNow().catch(() => {});
+    await requestCodexProbeCancel();
+    await saveSettingsNow().catch(err => log(`Save before surface reload failed: ${err.message || err}`));
+    await flushLogBuffer().catch(err => console.error("Log flush before reload failed", err));
     await sleep(120);
     // 带唯一参数跳转，连同 HTML 一起绕开缓存；脚本自身由 index.html 的
     // 动态注入器加时间戳，确保重载后跑的是磁盘上的最新代码。
@@ -5563,6 +5388,7 @@ async function runExitSequence() {
     }
   }
   finally {
+    await flushLogBuffer().catch(err => console.error("Final log flush failed", err));
     await releaseInstanceOwnership().catch((err) => log(`Release instance failed: ${err.message || err}`));
       try {
         await requestApplicationExit();
@@ -5586,6 +5412,7 @@ async function closeAppFast() {
 
 async function onWindowClose() {
   if (state.closing) return;
+  state.surfaceVisible = false;
   await Neutralino.window.hide().catch(() => {});
   settleWithin("Save settings on hide", saveSettingsNow(), EXIT_SAVE_TIMEOUT_MS);
 }
@@ -5629,11 +5456,16 @@ async function boot() {
   if (!verifyWindowReady) await refreshSubscriptionNodeCatalog();
   renderProxyNodes();
   await bindEvents();
-  await setTray().catch((err) => log(`Tray setup failed: ${err.message || err}`));
+  if (!verifyWindowReady) await setTray().catch((err) => log(`Tray setup failed: ${err.message || err}`));
   const attached = await attachExistingMainCore().catch((err) => {
     log(`Existing core attach failed: ${err.message || err}`);
     return false;
   });
+  if (state.handoffFromPid && !attached) {
+    log("UI handoff failed: existing core unavailable; will not start or restart any core");
+    await flushLogBuffer().catch(err => console.error("Handoff failure log flush failed", err));
+    await Neutralino.app.exit(1); return;
+  }
   setStatus();
   updateSystemNetworkOptimizeStatus();
   log("Ready");
@@ -5642,7 +5474,8 @@ async function boot() {
   const pendingWindowShowReason = state.pendingWindowShowReason;
   state.pendingWindowShowReason = "";
   if (verifyWindowReady) {
-    const surfaceReady = document.readyState !== "loading" && !!document.querySelector(".app");
+    const surfaceReady = document.readyState !== "loading" && !!document.querySelector(".app")
+      && !!document.getElementById("removeOfflineYamlBtn") && document.getElementById("probeProfile")?.options.length === 2;
     let probeResourcesReady = false;
     try {
       const dualModelScript = await dualModelProbeScriptPath();
@@ -5661,9 +5494,24 @@ async function boot() {
     else {
       log(`Window readiness verification failed: deferred=${pendingWindowShowReason || "none"} surface=${surfaceReady} probeResources=${probeResourcesReady}`);
     }
+    await Neutralino.filesystem.writeFile(await Neutralino.filesystem.getJoinedPath(state.paths.work, "ui-readiness.json"),
+      JSON.stringify({ build: APP_BUILD_ID, surfaceReady, probeResourcesReady, verificationPassed, hidden: true }));
+    await flushLogBuffer().catch(err => console.error("Readiness log flush failed", err));
     await Neutralino.window.hide().catch(() => {});
     await Neutralino.app.exit(verificationPassed ? 0 : 1);
     return;
+  }
+  else if (state.handoffFromPid) {
+    // Installation is background-only. Do not use the legacy show/hide first-frame workaround.
+    await Neutralino.window.hide();
+    const probeScript = await dualModelProbeScriptPath();
+    const owner = await readInstanceJson(state.paths.instanceLock);
+    if (Number(owner?.pid) !== state.handoffFromPid) throw new Error("UI handoff owner changed; refusing takeover");
+    await Neutralino.filesystem.writeFile(state.paths.instanceLock, JSON.stringify({ ...state.instanceIdentity, at: Date.now() }));
+    await Neutralino.filesystem.writeFile(await Neutralino.filesystem.getJoinedPath(state.paths.work, "ui-handoff-ready.json"),
+      JSON.stringify({ pid: Number(state.instanceIdentity.pid), previousPid: state.handoffFromPid, build: APP_BUILD_ID,
+        attached: true, node: state.currentNode, probeLanes: state.probePortByTag.size, probeScript, at: Date.now() }));
+    log("UI handoff ready; core and node unchanged; installer may retire the old UI process only");
   }
   else if (pendingWindowShowReason) {
     await showMainWindow(pendingWindowShowReason).catch((err) => log(`Deferred window show failed: ${err.message || err}`));

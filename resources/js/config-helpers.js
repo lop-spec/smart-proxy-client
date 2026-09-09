@@ -840,12 +840,27 @@
   }
 
   function normalizeCodexProbeResult(value) {
-    if (!successfulCodexProbeResult(value)) return null;
+    if (!value || typeof value !== "object") return null;
+    const attempt = value.lastAttempt || (!successfulCodexProbeResult(value) ? value : null);
+    const lastAttempt = attempt ? {
+      status: String(attempt.status || "unknown"), error: String(attempt.error || "").slice(0, 400),
+      failureScope: String(attempt.failureScope || ""), at: Number(attempt.at || attempt.measuredAt || 0),
+      roundId: String(attempt.roundId || "")
+    } : null;
+    if (!successfulCodexProbeResult(value)) return lastAttempt ? { status: lastAttempt.status, lastAttempt } : null;
     const number = (key) => Math.max(0, Number(value[key]) || 0);
     return {
       status: "done",
       node: String(value.node || "").slice(0, 500),
-      anthropicOk: value.anthropicOk !== false,
+      anthropicOk: Number(value.gateRounds) > 0 && typeof value.anthropicOk === "boolean" ? value.anthropicOk : null,
+      gateSkipped: !(Number(value.gateRounds) > 0),
+      probeReachable: value.probeReachable === true,
+      lastAttempt,
+      profileKey: String(value.profileKey || ""), roundId: String(value.roundId || ""),
+      sampleCount: number("sampleCount"), successfulSamples: number("successfulSamples"),
+      successRate: number("successRate"), verified: value.verified === true,
+      tokMin: number("tokMin"), tokMax: number("tokMax"), tokenCountSource: String(value.tokenCountSource || "legacy-estimate"),
+      samples: Array.isArray(value.samples) ? value.samples.slice(-8) : [],
       anthropicHttp: number("anthropicHttp"),
       anthropicMs: number("anthropicMs"),
       gatePass: number("gatePass"),
@@ -855,6 +870,8 @@
       tokPerSec: Math.round(number("tokPerSec") * 10) / 10,
       tokEst: Math.round(number("tokEst")),
       tokTtftMs: Math.round(number("tokTtftMs")),
+      tokTtftMedianMs: Math.round(number("tokTtftMedianMs")),
+      metricAggregate: String(value.metricAggregate || "single-sample"),
       tokStreamMs: Math.round(number("tokStreamMs")),
       tokElapsedMs: Math.round(number("tokElapsedMs")),
       tokDeltaCount: Math.round(number("tokDeltaCount")),
@@ -892,15 +909,14 @@
     const prior = previous && typeof previous === "object" ? previous : null;
     const candidate = next && typeof next === "object" ? next : null;
     if (!candidate) return prior;
-    if (["pending", "cancelled"].includes(candidate.status) && successfulCodexProbeResult(prior)) {
-      return { ...prior };
-    }
+    if (candidate.status === "pending" || candidate.gateOnly) return prior || { status: "pending" };
     if (successfulCodexProbeResult(candidate)) {
-      return { ...candidate, status: "done" };
+      return { ...candidate, status: "done", lastAttempt: { status: "done", at: Number(candidate.measuredAt || Date.now()), roundId: candidate.roundId || "" } };
     }
-    const failed = { ...candidate };
-    delete failed.tokPerSec;
-    return failed;
+    const lastAttempt = { status: candidate.status || "unknown", failureScope: candidate.failureScope || "round",
+      error: String(candidate.error || ""), at: Date.now(), roundId: candidate.roundId || "" };
+    if (successfulCodexProbeResult(prior)) return { ...prior, lastAttempt };
+    return { status: lastAttempt.status, lastAttempt, error: lastAttempt.error, failureScope: lastAttempt.failureScope };
   }
 
   function codexProbeResultFor(results, key) {
@@ -942,19 +958,18 @@
   function rankCodexProbeEntries(entries, results) {
     const ranked = [...(Array.isArray(entries) ? entries : [])]
       .map((entry, index) => ({ entry, index, rank: codexProbeRank(codexProbeResultFor(results, entry && entry.key)) }));
-    const medians = codexProbeModelMedians(ranked);
-    ranked.forEach((item) => {
-      const median = medians && medians.get(item.rank.model);
-      // 不改变展示/落盘的端到端 tok/s，只把跨模型排名换成“相对同模型中位数”。
-      item.rank.score = median > 0 ? item.rank.tok / median : item.rank.tok;
-    });
-    return ranked
-      .sort((left, right) => left.rank.band - right.rank.band
-        || right.rank.score - left.rank.score
-        || left.rank.ttft - right.rank.ttft
-        || left.rank.delay - right.rank.delay
-        || left.index - right.index)
-      .map((item) => item.entry);
+    // Different accounts/models/workloads have no shared scale. Never normalize
+    // disjoint node populations or fall back to comparing their raw tok/s.
+    for (const item of ranked) {
+      const result = codexProbeResultFor(results, item.entry && item.entry.key);
+      item.profile = String(result && result.profileKey || "legacy:" + item.rank.model);
+      if (result && result.lastAttempt && result.lastAttempt.status !== "done") item.rank.band = 2;
+    }
+    return ranked.sort((left, right) => left.rank.band - right.rank.band
+      || left.profile.localeCompare(right.profile)
+      || right.rank.tok - left.rank.tok
+      || left.rank.ttft - right.rank.ttft
+      || left.index - right.index).map(item => item.entry);
   }
 
   function rankCurrentCodexProbeEntries(entries, results, gateOutcomes, tokSuccessKeys) {
@@ -966,11 +981,14 @@
       : Array.isArray(tokSuccessKeys) ? tokSuccessKeys.includes(key) : false;
     const current = [...(Array.isArray(entries) ? entries : [])].filter((entry) => {
       const key = entry && entry.key;
-      return !!key
-        && gateFor(key)?.ok === true
-        && hasCurrentTok(key)
-        && successfulCodexProbeResult(codexProbeResultFor(results, key));
+      const value = codexProbeResultFor(results, key);
+      return !!key && gateFor(key)?.ok !== false && hasCurrentTok(key)
+        && successfulCodexProbeResult(value) && value.verified === true
+        && value.sampleCount >= 3 && value.successRate === 1 && !!value.profileKey
+        && (!value.lastAttempt || value.lastAttempt.status === "done");
     });
+    const profiles = new Set(current.map(entry => codexProbeResultFor(results, entry.key).profileKey));
+    if (profiles.size > 1) { console.warn("Benchmark ranking withheld: incompatible measurement profiles"); return []; }
     return rankCodexProbeEntries(current, results);
   }
 
@@ -2113,6 +2131,8 @@ Write-Output ("cleared=" + (($targets | ForEach-Object { $_.ProcessId }) -join '
     normalizeSubscriptions,
     nodeDisplayMeta,
     normalizeCodexProbeStore,
+    normalizeCodexProbeResult,
+    successfulCodexProbeResult,
     normalizeNodeLeagueStore,
     openAiCustomRule,
     parseSubscriptionTraffic,

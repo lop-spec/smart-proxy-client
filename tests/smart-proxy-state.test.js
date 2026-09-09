@@ -16,7 +16,8 @@ const previous = {
   requestedModel: "gpt-5.3-codex-spark",
   resolvedModel: "gpt-5.3-codex-spark",
   resolvedModelVerified: true,
-  measuredAt: 100
+  measuredAt: 100,
+  verified: true, sampleCount: 3, successfulSamples: 3, successRate: 1, profileKey: "fixed", roundId: "round"
 };
 
 assert.deepEqual(
@@ -24,15 +25,15 @@ assert.deepEqual(
   previous,
   "pending must not replace the last successful tok/s"
 );
-assert.deepEqual(
-  helpers.mergeCodexProbeResult(previous, { status: "cancelled" }),
-  previous,
-  "cancelling an unfinished probe must not be treated as a measured node failure"
+assert.equal(
+  helpers.mergeCodexProbeResult(previous, { status: "cancelled" }).tokPerSec,
+  previous.tokPerSec,
+  "cancellation must retain the previous success and record cancellation separately"
 );
 const failedProbe = helpers.mergeCodexProbeResult(previous, { status: "error", error: "timeout" });
-assert.equal(failedProbe.status, "error", "an attempted node failure must replace the previous success");
-assert.equal(failedProbe.error, "timeout");
-assert.equal(failedProbe.tokPerSec, undefined, "an attempted node failure must clear the previous tok/s");
+assert.equal(failedProbe.status, "done", "a failure must not destroy historical success");
+assert.equal(failedProbe.lastAttempt.error, "timeout");
+assert.equal(failedProbe.tokPerSec, previous.tokPerSec);
 
 const failedGate = helpers.mergeCodexProbeResult(previous, {
     status: "done",
@@ -40,13 +41,9 @@ const failedGate = helpers.mergeCodexProbeResult(previous, {
     anthropicHttp: 0,
     error: "gate failed"
   });
-assert.equal(failedGate.anthropicOk, false, "an attempted gate failure must replace the previous success");
-assert.equal(failedGate.tokPerSec, undefined, "an attempted gate failure must clear the previous tok/s");
-assert.deepEqual(
-  Object.keys(helpers.normalizeCodexProbeStore({ results: { a: failedProbe } }).results),
-  [],
-  "a finalized failure must remove the previous success from restart persistence"
-);
+assert.equal(failedGate.tokPerSec, previous.tokPerSec, "independent gate evidence must not erase speed history");
+assert.equal(failedGate.lastAttempt.error, "gate failed");
+assert.equal(helpers.normalizeCodexProbeStore({ results: { a: failedProbe } }).results.a.tokPerSec, previous.tokPerSec);
 
 const fresh = helpers.mergeCodexProbeResult(previous, {
   status: "done",
@@ -92,8 +89,8 @@ const crossModelRanked = helpers.rankCodexProbeEntries(crossModelEntries, {
 });
 assert.deepEqual(
   crossModelRanked.map((entry) => entry.key),
-  ["slow-best", "fast-best", "fast-base", "slow-base"],
-  "cross-model ranking must compare each node with its model median instead of comparing incompatible raw tok/s"
+  ["fast-best", "fast-base", "slow-best", "slow-base"],
+  "different models remain separate stable groups, never median-calibrated together"
 );
 
 const sparseModelRanked = helpers.rankCodexProbeEntries(crossModelEntries.slice(0, 3), {
@@ -103,7 +100,7 @@ const sparseModelRanked = helpers.rankCodexProbeEntries(crossModelEntries.slice(
 assert.deepEqual(
   sparseModelRanked.map((entry) => entry.key),
   ["fast-base", "slow-best", "slow-base"],
-  "cross-model ranking must fall back to raw tok/s until every model has at least two successful samples"
+  "sparse model samples must not change the comparison scale"
 );
 
 const currentWinners = helpers.rankCurrentCodexProbeEntries(
@@ -136,7 +133,8 @@ const currentResult = (model, tokPerSec) => ({
   tokTtftMs: 220,
   requestedModel: model,
   resolvedModel: model,
-  resolvedModelVerified: true
+  resolvedModelVerified: true,
+  verified: true, sampleCount: 3, successRate: 1, profileKey: model
 });
 const currentScopedResults = {
   "slow-best": currentResult("model-slow", 30),
@@ -155,8 +153,8 @@ const currentScopedRanked = helpers.rankCurrentCodexProbeEntries(
 );
 assert.deepEqual(
   currentScopedRanked.map((entry) => entry.key),
-  ["slow-best", "fast-best", "fast-base", "slow-base"],
-  "current-round model medians must exclude stale or failed samples"
+  [],
+  "incompatible profiles cannot elect a common winner, regardless of stale samples"
 );
 
 const store = helpers.normalizeCodexProbeStore({
@@ -167,7 +165,8 @@ const store = helpers.normalizeCodexProbeStore({
     bad: { status: "error", tokPerSec: 0, error: "timeout" }
   }
 });
-assert.deepEqual(Object.keys(store.results), ["a"], "only successful tok/s values are restart-persistent");
+assert.deepEqual(Object.keys(store.results), ["a", "bad"], "historical success and latest failure state both survive restart");
+assert.equal(store.results.bad.tokPerSec, undefined);
 assert.equal(store.results.a.tokPerSec, 42.5);
 
 const effectiveStore = helpers.normalizeCodexProbeStore({
@@ -195,9 +194,9 @@ const rejectedStore = helpers.normalizeCodexProbeStore({
   }
 });
 assert.deepEqual(
-  Object.keys(rejectedStore.results),
+  Object.values(rejectedStore.results).filter(value => value.tokPerSec > 0),
   [],
-  "failed gates and unverified models must never enter the persistent speed history"
+  "invalid measurements cannot become persistent speed values; diagnostics may persist"
 );
 
 assert.equal(
@@ -234,14 +233,10 @@ const storeResultSource = mainScript.slice(
 );
 assert.match(
   storeResultSource,
-  /syncCodexProbeStore\(\)/,
-  "every finalized probe result must persist so a failed node cannot resurrect its previous tok/s after restart"
+  /normalizeCodexProbeResult\(merged\)/,
+  "finalized results must incrementally persist their measurement and attempt state"
 );
-assert.doesNotMatch(
-  mainScript,
-  /previous value kept/,
-  "failure logs must not claim that the previous tok/s was kept"
-);
+assert.match(mainScript, /previous success retained/, "failure logs must explicitly distinguish historical success");
 const catalogRefreshSource = mainScript.slice(
   mainScript.indexOf("async function refreshSubscriptionNodeCatalog("),
   mainScript.indexOf("async function loadMergedCachedSubscriptionPoolForStartup()")
@@ -270,30 +265,9 @@ assert.match(
   /options\.manual !== true/,
   "the low-level node switch must reject callers without an explicit manual origin"
 );
-const leagueWinnerSource = mainScript.slice(
-  mainScript.indexOf("const verifiedRanked = SmartProxyConfig.rankCurrentCodexProbeEntries("),
-  mainScript.indexOf("const successful = entries.filter(")
-);
-assert.match(
-  leagueWinnerSource,
-  /options\.autoSwitchWinner === true[\s\S]*!options\.continuous[\s\S]*!state\.codexProbeCancelRequested[\s\S]*tokModelFailureCount === 0/,
-  "only a completed manual benchmark with no unresolved model failures may authorize the winner switch"
-);
-assert.match(
-  leagueWinnerSource,
-  /switchToNode\([\s\S]*manual: true[\s\S]*manualProbeWinner: true/,
-  "the benchmark winner switch must be marked as originating from the manual benchmark"
-);
-assert.match(
-  mainScript,
-  /testAllCodexNodes\(\{ autoSwitchWinner: true \}\)/,
-  "the manual full-benchmark button must request a winner switch"
-);
-assert.match(
-  mainScript,
-  /testAllCodexNodes\(\{ entries, autoSwitchWinner: true \}\)/,
-  "the manual group benchmark must request a winner switch within that group"
-);
+const leagueWinnerSource = mainScript.slice(mainScript.indexOf("async function testAllCodexNodes("), mainScript.indexOf("// 分组测速"));
+assert.doesNotMatch(leagueWinnerSource, /switchToNode\(/, "benchmarking is measurement-only");
+assert.doesNotMatch(mainScript, /autoSwitchWinner:\s*true/, "neither group nor full benchmarks may implicitly switch nodes");
 assert.doesNotMatch(
   mainScript.slice(mainScript.indexOf("async function runContinuousCompetition()"), mainScript.indexOf("// ---- 入口域名健康检查 ----")),
   /autoSwitchWinner\s*:\s*true|switchToNode\(/,
@@ -332,7 +306,7 @@ assert.doesNotMatch(
 );
 assert.match(
   mainScript,
-  /runBatchTokProbe\(reachable\.map\(/,
+  /runBatchTokProbe\(entries\.map\(/,
   "all remaining nodes must stay in one pool so a failed model cannot re-enter later in the round"
 );
 const bulkProbePreamble = mainScript.slice(
@@ -344,19 +318,14 @@ assert.match(
   /if \(!state\.subscriptionNodeCatalog\.length\) await refreshSubscriptionNodeCatalog\(\)/,
   "a warm manual benchmark must reuse the live catalog instead of rereading every YAML cache"
 );
-const bulkProbeDnsSource = mainScript.slice(
-  mainScript.indexOf("const deferEndpointDnsRefresh ="),
-  mainScript.indexOf("// 分组测速", mainScript.indexOf("const deferEndpointDnsRefresh ="))
-);
-assert.match(bulkProbeDnsSource, /if \(!deferEndpointDnsRefresh\)[\s\S]*await refreshEndpointDnsHealth/, "forced and continuous DNS checks must still block for fresh evidence");
-assert.match(bulkProbeDnsSource, /if \(deferEndpointDnsRefresh\)[\s\S]*setTimeout\([\s\S]*refreshEndpointDnsHealth/, "normal manual benchmarking must defer an expired DNS refresh until after the measured round");
+assert.doesNotMatch(leagueWinnerSource, /entryEndpointDead\(/, "system DNS must not exclude benchmark nodes");
 assert.match(mainScript, /elapsedMs:\s*benchmarkElapsedMs/, "the UI result must expose click-to-completion benchmark time");
 
 const batchFunctionSource = mainScript.slice(
-  mainScript.indexOf("async function runBatchTokProbe(items)"),
+  mainScript.indexOf("async function runBatchTokProbe("),
   mainScript.indexOf("// 单节点完整测速")
 );
-assert.match(batchFunctionSource, /Neutralino\.os\.execCommand\(/, "the round must cross Neutralino's serialized process boundary only once");
+assert.match(batchFunctionSource, /Neutralino\.os\.spawnProcess\(/, "the round must launch one controllable helper process");
 assert.match(batchFunctionSource, /dualModelProbeScriptPath\(/, "the one process launch must be the batch helper");
 assert.doesNotMatch(
   batchFunctionSource,
@@ -366,14 +335,12 @@ assert.doesNotMatch(
 
 const batchScript = fs.readFileSync(path.join(__dirname, "..", "resources", "scripts", "dual-model-probe.js"), "utf8");
 assert.match(batchScript, /child_process/, "the helper must own the real child-process concurrency");
-assert.match(batchScript, /createSemaphore\(plan\.tokenMixProcesses\)/, "TokenMix child processes must stay below the verified streaming limit");
-assert.match(batchScript, /chatgpt\.com\/backend-api\/codex\/responses/, "Codex routes must skip the per-node app-server startup delay");
-assert.match(batchScript, /DEFAULT_ROUND_DEADLINE_MS = 8000/, "model failover must share one hard whole-round time budget");
-assert.match(mainScript, /CODEX_TOK_PROBE_TIMEOUT_S = 8/, "Codex nodes must receive the full round budget before a node failure is final");
-assert.match(mainScript, /TOKENMIX_TOK_PROBE_TIMEOUT_S = 8/, "TokenMix nodes must use the same full-round ceiling");
-assert.match(batchScript, /roundDeadlineAt/, "late takeover work must inherit the remaining round deadline");
-assert.match(batchScript, /const routeTimeoutSeconds = Math\.ceil\(roundDeadlineMs \/ 1000\)/, "the live pre-upgrade UI's 5s argument must be raised to the 8s round budget");
-assert.match(batchScript, /codexAccountAuth\(options\.codexHome,\s*options\)/, "each Codex route must load and refresh its own discovered account");
+assert.match(batchScript, /MAX_GLOBAL_CONCURRENCY = 4/, "all profiles share the same global ceiling");
+assert.match(batchScript, /chatgpt\.com\/backend-api\/codex\/responses/, "per-node requests must not start Codex app-server");
+assert.match(mainScript, /CODEX_TOK_PROBE_TIMEOUT_S = 30/);
+assert.match(mainScript, /TOKENMIX_TOK_PROBE_TIMEOUT_S = 30/);
+assert.doesNotMatch(batchScript, /roundDeadlineAt/, "queued requests cannot inherit an expired batch deadline");
+assert.match(batchScript, /codexAccountAuth\(options\.codexHome,\s*options\)/);
 assert.match(batchScript, /header = "Authorization: Bearer /, "the account token must be sent to the real Codex endpoint");
 assert.match(batchScript, /header = "chatgpt-account-id: /, "the real account id must select the matching subscription");
 assert.match(batchScript, /child\.stdin\.end\(\[/, "credentials must travel through child stdin");
@@ -394,20 +361,12 @@ assert.match(batchScript, /roughly 80 words; exact length does not matter/, "the
 assert.match(batchScript, /reasoning:\s*\{ effort: "low" \}/, "Spark must use its lowest supported reasoning effort");
 assert.doesNotMatch(batchScript, /reasoning\.encrypted_content/, "a one-turn speed probe must not download unused encrypted reasoning state");
 assert.match(batchScript, /chatgpt-responses-sse-model/, "the resolved model must come from the real SSE response");
-assert.match(batchScript, /Count from 1 to 60 in words/, "the real TokenMix streamed benchmark must remain intact");
-assert.match(batchScript, /tokPerSec: effectiveTokPerSec\(textTokens, elapsedMs\)/, "Codex must score the full request interval");
-assert.match(batchScript, /tokPerSec: effectiveTokPerSec\(tokEst, elapsedMs\)/, "TokenMix must use the same full-request score");
-assert.match(batchScript, /deltaCount < 4 \|\| deltaStreamMs < CODEX_BUFFERED_STREAM_MS/, "short or coalesced Codex streams must retain buffering evidence");
-assert.equal(
-  (batchScript.match(/timingSource: EFFECTIVE_RATE_TIMING_SOURCE/g) || []).length,
-  2,
-  "both live model implementations must persist one comparable timing source"
-);
-assert.equal(
-  (batchScript.match(/streamMs: elapsedMs/g) || []).length,
-  2,
-  "a currently running pre-upgrade UI must receive an end-to-end denominator immediately"
-);
+assert.match(batchScript, /text: PROMPT/, "both profiles use the same request text");
+assert.match(batchScript, /content: PROMPT/);
+assert.match(batchScript, /effectiveTokPerSec\(parsed.tokens, elapsedMs\)/, "both profiles use actual usage and request-to-last-token elapsed time");
+assert.match(batchScript, /streamBuffered:/, "buffering evidence survives");
+assert.match(batchScript, /timingSource: TIMING_SOURCE/);
+assert.doesNotMatch(batchScript, /characters\s*\/\s*[46]/, "token counts must not be estimated from characters");
 assert.match(mainScript, /tok\.deliveryStreamMs \?\? tok\.streamMs/, "the next UI load must retain the separate delivery window");
 assert.equal(batchProbe.codexChannelFailure(401, "unauthorized"), true, "account authentication failure must disable only that route");
 assert.equal(batchProbe.codexChannelFailure(429, "rate limit"), true, "account quota failure must trigger takeover");
@@ -484,12 +443,11 @@ assert.equal(batchProbe.effectiveTokPerSec(100, 0), 0, "an invalid elapsed time 
     fs.rmSync(refreshFixture, { recursive: true, force: true });
   }
 
-  const roundPlan = batchProbe.concurrencyForRound(179, { codexAccountCount: 3 });
-  assert.equal(roundPlan.codexAccounts, 3, "all three GPT-5.3 accounts must be independent routes");
-  assert.equal(roundPlan.codex, 50, "each GPT account must use the verified direct-request window");
-  assert.equal(roundPlan.tokenMixProcesses, 20, "TokenMix must stay below its observed concurrent-stream 429 limit");
-  assert.equal(roundPlan.routeCount, 4, "three GPT accounts plus TokenMix must form four routes");
-  assert.equal(roundPlan.maxActiveTotal, 170, "the healthy full round must use all four stable route windows together");
+  const activePlan = batchProbe.concurrencyForRound(179, { codexAccountCount: 3 });
+  assert.equal(activePlan.maxActiveTotal, 4);
+  assert.equal(activePlan.routeCount, 1, "the active benchmark uses one fixed profile");
+  // Keep exercising the legacy general-purpose pool independently of the active engine.
+  const roundPlan = { codex: 2, tokenMixProcesses: 2 };
 
   const calls = new Map();
   const routeIds = ["codex-primary", "codex-acct2", "codex-acct3", "tokenmix"];
@@ -527,7 +485,7 @@ assert.equal(batchProbe.effectiveTokPerSec(100, 0), 0, "an invalid elapsed time 
   const syntheticElapsedMs = Date.now() - startedAt;
   assert.equal(calls.size, 179, "a healthy round must de-duplicate all current static ports");
   assert.ok([...calls.values()].every((count) => count === 1), "each healthy node must be measured exactly once");
-  assert.equal(maxTotal, 170, "the four healthy routes must fill every verified route window together");
+  assert.equal(maxTotal, 8, "the generic legacy pool must respect its explicitly configured slots");
   for (const id of routeIds) {
     assert.ok(modelCalls.get(id) > 0, `${id} must pull different nodes from the shared queue`);
     assert.ok(maxByModel.get(id) > 0, `${id} must have real concurrent activity`);

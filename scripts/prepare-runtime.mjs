@@ -106,23 +106,16 @@ async function prepareFont() {
 }
 
 function preparePrivateConfig() {
-  const manifestPath = join(root, "private-config.manifest.json");
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  // Only the generated resource subtree is cleaned. User/source configurations
+  // remain untouched and are never copied into distributable artifacts.
   const outputRoot = join(root, "resources", "private-config");
   rmSync(outputRoot, { recursive: true, force: true });
-  mkdirSync(join(outputRoot, "files"), { recursive: true });
-  for (const item of manifest.files || []) {
-    const source = resolve(root, item.source);
-    if (!source.startsWith(root + "\\") || !existsSync(source)) {
-      throw new Error(`Private configuration is missing or outside the project: ${item.source}`);
-    }
-    const destination = join(outputRoot, "files", item.source);
-    mkdirSync(dirname(destination), { recursive: true });
-    copyFileSync(source, destination);
-  }
-  copyFileSync(manifestPath, join(outputRoot, "manifest.json"));
+  mkdirSync(outputRoot, { recursive: true });
+  writeFileSync(join(outputRoot, "manifest.json"), JSON.stringify({ version: 1, files: [], privateSeedsIncluded: false,
+    reason: "Public-safe artifact; existing local subscriptions and settings are preserved" }, null, 2));
+  console.log("Personal configuration excluded from artifact; local user files are unchanged.");
 }
 
 await Promise.all([prepareNeutralino(), prepareSingBox(), prepareFont()]);
 preparePrivateConfig();
-console.log("Pinned runtimes and private configuration are ready.");
+console.log("Pinned runtimes and public-safe resources are ready.");
