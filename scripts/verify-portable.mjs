@@ -75,6 +75,7 @@ const embeddedPayloads = [
   assertEmbeddedPayload("sing-box runtime", join(root, "resources", "bin", "sing-box.exe")),
   assertEmbeddedPayload("Codex subscription probe helper", join(root, "resources", "scripts", "codex-subscription-probe.ps1")),
   assertEmbeddedPayload("dual-model probe helper", join(root, "resources", "scripts", "dual-model-probe.js")),
+  assertEmbeddedPayload("Node runtime resolver", join(root, "resources", "scripts", "resolve-node.ps1")),
   assertEmbeddedPayload("probe config helper", join(root, "resources", "js", "config-helpers.js")),
   assertEmbeddedPayload("NotoSansCJKsc-Regular.otf", join(root, "resources", "fonts", "NotoSansCJKsc-Regular.otf")),
   assertEmbeddedPayload("public-safe seed policy", join(root, "resources", "private-config", "manifest.json"))

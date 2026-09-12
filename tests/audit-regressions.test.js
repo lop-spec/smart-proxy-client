@@ -207,9 +207,9 @@ test("UI handoff authenticates previous lock owner and never kills it during ver
 });
 test("native helper cancellation reaches stdin and removes its event listener", async () => {
   const a=app();let listener=null,cancels=0;
-  a.run('dualModelProbeScriptPath=async()=>"C:/fixture/helper.js"');
+  a.run('dualModelProbeScriptPath=async()=>"C:/fixture/helper.js";resolveProbeNodeRuntime=async()=>"C:/portable Pi/runtime/node.exe"');
   a.context.Neutralino.events={on:async(_name,fn)=>{listener=fn},off:async()=>{listener=null}};
-  a.context.Neutralino.os={spawnProcess:async()=>({id:101,pid:202}),updateSpawnedProcess:async(id,action,data)=>{
+  a.context.Neutralino.os={spawnProcess:async command=>{assert.ok(command.startsWith('"C:/portable Pi/runtime/node.exe" '));return {id:101,pid:202};},updateSpawnedProcess:async(id,action,data)=>{
     assert.equal(id,101);assert.equal(action,'stdIn');assert.equal(JSON.parse(data).action,'cancel');cancels++;
     listener({detail:{id:101,action:'stdOut',data:JSON.stringify({type:'result',ok:true,cancelled:true,outcomes:[{port:40919,value:{ok:false,failureScope:'cancelled'}}]})+'\n'}});
     listener({detail:{id:101,action:'exit',data:0}});
@@ -217,6 +217,15 @@ test("native helper cancellation reaches stdin and removes its event listener", 
   const pending=a.run('runBatchTokProbe([{port:40919}])');await new Promise(resolve=>setImmediate(resolve));
   await a.run('requestCodexProbeCancel()');const result=await pending;
   assert.equal(cancels,1);assert.equal(result.get(40919).failureScope,'cancelled');assert.equal(listener,null);assert.equal(a.run('state.probeJob'),null);
+});
+test("Node discovery uses a validated absolute runtime rather than bare node.exe", async () => {
+  const a=app();a.run('bundledProbeScriptPath=async()=>"C:/app/resolve-node.ps1";buildPowerShellExecCommand=x=>x;state.paths.appRoot="C:/app";');
+  a.context.Neutralino.os.execCommand=async command=>{assert.match(command,/resolve-node\.ps1.*-AppRoot/);return {exitCode:0,stdOut:JSON.stringify({path:'D:/Pi/runtime/node.exe',version:'v22.18.0'})};};
+  assert.equal(await a.run('resolveProbeNodeRuntime()'),'D:/Pi/runtime/node.exe');
+  for(const result of [{exitCode:1,stdOut:''},{exitCode:0,stdOut:'not JSON'},{exitCode:0,stdOut:JSON.stringify({path:'x',version:'v18.0.0'})}]){
+    a.context.Neutralino.os.execCommand=async()=>result;
+    await assert.rejects(a.run('resolveProbeNodeRuntime()'),/Node 22\+/);
+  }
 });
 test("hidden window rendering is gated and unchanged connection DOM is reused", () => {
   const a=app();let writes=0,html='sentinel';a.elements.set('connRows',{get innerHTML(){return html},set innerHTML(v){html=v;writes++}});

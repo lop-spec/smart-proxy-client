@@ -3,7 +3,7 @@ const MAIN_CONTROLLER_TIMEOUT_MS = 8000;
 const MAIN_CORE_START_ATTEMPTS = 3;
 const MAIN_CORE_RETRY_DELAY_MS = 450;
 const APP_CONFIG_VERSION = 17;
-const APP_BUILD_ID = "2026-09-09-bounded-fair-probes-v1.1.0";
+const APP_BUILD_ID = "2026-09-12-node-runtime-discovery-v1.1.1";
 const LOG_MAX_FILE_BYTES = 8 * 1024 * 1024;
 const LOG_MAX_BUFFER_BYTES = 256 * 1024;
 const LOG_FLUSH_MS = 500;
@@ -3462,6 +3462,22 @@ async function dualModelProbeScriptPath() {
   return bundledProbeScriptPath(TOK_PROBE_BATCH_SCRIPT, "Dual-model probe helper");
 }
 
+async function resolveProbeNodeRuntime() {
+  const resolver = await bundledProbeScriptPath("resolve-node.ps1", "Node runtime resolver");
+  const result = await Neutralino.os.execCommand(buildPowerShellExecCommand(
+    `& ${psQuote(resolver)} -AppRoot ${psQuote(state.paths.appRoot)}; exit $LASTEXITCODE`
+  ), { cwd: state.paths.work });
+  if (String(result.stdErr || "").trim()) log(`Node discovery: ${String(result.stdErr).trim().slice(0, 600)}`);
+  let runtime;
+  try { runtime = JSON.parse(String(result.stdOut || "").trim()); } catch { /* Fixed error below; no raw subprocess output. */ }
+  if (Number(result.exitCode) !== 0 || !runtime?.path || !/^v(?:2[2-9]|[3-9]\d|\d{3,})\./.test(runtime.version || "")) {
+    log("Node discovery failed: no validated Node 22+ runtime; benchmark not started");
+    throw new Error("找不到可用的 Node 22+；已检查应用目录、PATH、运行中的 Pi/Node 和标准安装目录");
+  }
+  log(`Benchmark Node runtime: ${runtime.path} (${runtime.version})`);
+  return runtime.path;
+}
+
 async function ensureCodexProbeReady() {
   if (state.codexProbeLanesDisabled) throw new Error("探测端口被占用；主代理已降级启动，当前不能测速");
   const live = state.mainCoreReady
@@ -3884,7 +3900,8 @@ async function runBatchTokProbe(items, options = {}) {
   if (!usable.length) return byPort;
   const profile = $("probeProfile")?.value || state.settings.benchmarkProfile || "codex";
   const scriptPath = await dualModelProbeScriptPath();
-  const command = ["node.exe", quote(scriptPath), "--ports", quote(usable.map(item => Number(item.port)).join(",")),
+  const nodePath = await resolveProbeNodeRuntime();
+  const command = [quote(nodePath), quote(scriptPath), "--ports", quote(usable.map(item => Number(item.port)).join(",")),
     "--profile", profile === "tokenmix" ? "tokenmix" : "codex", "--concurrency", "4", "--timeout-seconds", "30",
     "--tokenmix-key-file", quote(TOKENMIX_TOK_PROBE_KEY_FILE), "--codex-homes-root", quote(CODEX_TOK_PROBE_HOMES_ROOT),
     "--codex-model", quote(CODEX_TOK_PROBE_MODEL), "--tokenmix-model", quote(TOKENMIX_TOK_PROBE_MODEL)].join(" ");
@@ -5520,12 +5537,13 @@ async function boot() {
     // Installation is background-only. Do not use the legacy show/hide first-frame workaround.
     await Neutralino.window.hide();
     const probeScript = await dualModelProbeScriptPath();
+    const nodeRuntime = await resolveProbeNodeRuntime();
     const owner = await readInstanceJson(state.paths.instanceLock);
     if (Number(owner?.pid) !== state.handoffFromPid) throw new Error("UI handoff owner changed; refusing takeover");
     await Neutralino.filesystem.writeFile(state.paths.instanceLock, JSON.stringify({ ...state.instanceIdentity, at: Date.now() }));
     await Neutralino.filesystem.writeFile(await Neutralino.filesystem.getJoinedPath(state.paths.work, "ui-handoff-ready.json"),
       JSON.stringify({ pid: Number(state.instanceIdentity.pid), previousPid: state.handoffFromPid, build: APP_BUILD_ID,
-        attached: true, node: state.currentNode, probeLanes: state.probePortByTag.size, probeScript, at: Date.now() }));
+        attached: true, node: state.currentNode, probeLanes: state.probePortByTag.size, probeScript, nodeRuntime, at: Date.now() }));
     log("UI handoff ready; core and node unchanged; installer may retire the old UI process only");
   }
   else if (pendingWindowShowReason) {
