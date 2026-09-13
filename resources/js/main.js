@@ -3,7 +3,7 @@ const MAIN_CONTROLLER_TIMEOUT_MS = 8000;
 const MAIN_CORE_START_ATTEMPTS = 3;
 const MAIN_CORE_RETRY_DELAY_MS = 450;
 const APP_CONFIG_VERSION = 17;
-const APP_BUILD_ID = "2026-09-12-node-runtime-discovery-v1.1.1";
+const APP_BUILD_ID = "2026-09-13-site-history-failover-v1.2.0";
 const LOG_MAX_FILE_BYTES = 8 * 1024 * 1024;
 const LOG_MAX_BUFFER_BYTES = 256 * 1024;
 const LOG_FLUSH_MS = 500;
@@ -160,6 +160,11 @@ const DEFAULT_SETTINGS = {
   mainControllerPort: 19099,
   jitterGuardEnabled: true,
   jitterCooldownMinutes: 10,
+  siteFailoverEnabled: false,
+  siteFailoverTargets: "chatgpt.com",
+  siteFailoverThreshold: 2,
+  siteFailoverWindowSeconds: 60,
+  siteFailoverCooldownSeconds: 180,
   autoRecoverOnEndpointFailure: true,
   lastSelectedNodeKey: "",
   lastSelectedNodeTag: "",
@@ -204,6 +209,10 @@ const state = {
   mainHealthRecoveryPending: false,
   systemProxyApplied: false,
   logSocket: null,
+  logReconnectTimer: null,
+  siteFailoverGuard: null,
+  siteFailoverRevision: 0,
+  siteFailoverLogReady: false,
   connTimer: null,
   currentView: "home",
   surfaceVisible: false,
@@ -670,6 +679,19 @@ function readSettingsFromForm() {
   s.autoRecoverOnEndpointFailure = $("autoRecoverOnEndpointFailure")
     ? $("autoRecoverOnEndpointFailure").checked
     : s.autoRecoverOnEndpointFailure !== false;
+  s.siteFailoverEnabled = $("siteFailoverEnabled") ? $("siteFailoverEnabled").checked === true : s.siteFailoverEnabled;
+  if ($("siteFailoverTargets")) s.siteFailoverTargets = $("siteFailoverTargets").value.trim();
+  for (const key of ["siteFailoverThreshold", "siteFailoverWindowSeconds", "siteFailoverCooldownSeconds"]) {
+    if ($(key)) s[key] = Number($(key).value) || DEFAULT_SETTINGS[key];
+  }
+  if (s.siteFailoverEnabled) {
+    SmartProxySiteFailover.config(s); // Reject invalid input before persisting.
+    if (!["info", "debug", "trace"].includes(s.logLevel)) {
+      s.logLevel = "info";
+      if ($("logLevel")) $("logLevel").value = "info";
+      log("Site failover requires correlated info logs; saved log level raised to info (running core not restarted)");
+    }
+  }
   readNodeGroupRulesFromForm();
 }
 
@@ -720,6 +742,7 @@ function writeSettingsToForm() {
   if ($("systemProxyEnabled")) $("systemProxyEnabled").checked = !!state.settings.systemProxyEnabled;
   if ($("globalProxyEnabled")) $("globalProxyEnabled").checked = !!state.settings.globalProxyEnabled;
   if ($("jitterGuardEnabled")) $("jitterGuardEnabled").checked = !!state.settings.jitterGuardEnabled;
+  if ($("siteFailoverEnabled")) $("siteFailoverEnabled").checked = state.settings.siteFailoverEnabled === true;
   if ($("autoRecoverOnEndpointFailure")) {
     $("autoRecoverOnEndpointFailure").checked = state.settings.autoRecoverOnEndpointFailure !== false;
   }
@@ -1167,6 +1190,7 @@ function saveSettings(options = {}) {
     .then(() => applyAutoStartSetting())
     .then(() => options.applyRuntime ? applyRuntimeSettings() : null)
     .then(() => syncContinuousCompetition("settings-saved"))
+    .then(() => syncSiteFailoverState("settings-saved"))
     .then(() => {
       setSettingsSaveStatus(`已保存 ${nowText()}`, "ok");
       log("Settings saved");
@@ -3215,10 +3239,13 @@ function startCoreLogStream() {
   state.coreProcessByConnId = new Map();
   state.coreHostByConnId = new Map();
   try {
-    const url = `ws://127.0.0.1:${state.settings.mainControllerPort}/logs?token=${encodeURIComponent(MAIN_SECRET)}`;
+    const url = `ws://127.0.0.1:${state.settings.mainControllerPort}/logs?level=info&token=${encodeURIComponent(MAIN_SECRET)}`;
     const ws = new WebSocket(url);
     state.logSocket = ws;
-    ws.onopen = () => log("[core] log stream connected");
+    ws.onopen = () => {
+      log("[core] log stream connected");
+      syncSiteFailoverState("log-stream-connected").catch(err => log(`Site failover readiness failed: ${err.message || err}`));
+    };
     ws.onmessage = (event) => {
       const raw = String(event.data || "");
       try {
@@ -3226,7 +3253,10 @@ function startCoreLogStream() {
         const level = item.type || item.level || "info";
         const payload = enrichCoreLogPayload(item.payload || item.message || raw);
         log(`[core/${level}] ${payload}`);
-        try { recordCoreLogSignal(level, payload); } catch { /* 抖动判别绝不影响日志流 */ }
+        try {
+          recordSiteFailoverSignal(level, payload);
+          recordCoreLogSignal(level, payload);
+        } catch (err) { log(`Core signal processing failed: ${err.message || err}`); }
       }
       catch {
         log(`[core] ${enrichCoreLogPayload(raw)}`);
@@ -3234,7 +3264,13 @@ function startCoreLogStream() {
     };
     ws.onerror = () => log("[core] log stream error");
     ws.onclose = () => {
-      if (state.logSocket === ws) state.logSocket = null;
+      if (state.logSocket !== ws) return;
+      state.logSocket = null;
+      state.siteFailoverLogReady = false;
+      if (!state.closing && state.mainCoreReady) {
+        log("[core] log stream closed; failover detection paused, reconnect in 2s (core unchanged)");
+        state.logReconnectTimer = setTimeout(() => { state.logReconnectTimer = null; startCoreLogStream(); }, 2000);
+      } else log("[core] log stream closed; no reconnect: core stopped or app closing");
     };
   }
   catch (err) {
@@ -3244,6 +3280,9 @@ function startCoreLogStream() {
 
 
 function stopCoreLogStream() {
+  if (state.logReconnectTimer) clearTimeout(state.logReconnectTimer);
+  state.logReconnectTimer = null;
+  state.siteFailoverLogReady = false;
   if (!state.logSocket) return;
   const ws = state.logSocket;
   state.logSocket = null;
@@ -3284,6 +3323,7 @@ async function switchToNode(node, label, options = {}) {
     log(`Blocked non-manual low-level node switch: ${node || "-"}`);
     return false;
   }
+  state.siteFailoverRevision += 1; // Manual intent cancels any in-flight automatic selection.
   if (!node) return false;
   if (!state.mainProcess) {
     log(`${label || "Switch"} skipped: main core is not running`);
@@ -4484,6 +4524,85 @@ function scheduleConfigApply() {
   }
 }
 
+// ---- Website failure hot-switch: explicit opt-in, historical scores or random OTHER subscription ----
+async function syncSiteFailoverState(reason) {
+  if (!state.settings.siteFailoverEnabled) {
+    log(`[site-failover] disabled (${reason}); existing manual-only policy retained`);
+    return false;
+  }
+  try {
+    const cfg = SmartProxySiteFailover.config(state.settings);
+    const running = await api(mainController(), MAIN_SECRET, "/configs");
+    state.siteFailoverLogReady = ["info", "debug", "trace"].includes(running?.["log-level"]);
+    if (!state.siteFailoverLogReady) {
+      log(`[site-failover] not armed: running core log level=${running?.["log-level"] || "unknown"}; info required for connection attribution; core unchanged`);
+      return false;
+    }
+    log(`[site-failover] armed (${reason}): sites=${cfg.targets.map(t => t.host).join(",")} threshold=${cfg.threshold}/${cfg.windowMs / 1000}s cooldown=${cfg.cooldownMs / 1000}s; other-subscription historical best, random if no history; probes=0`);
+    return true;
+  } catch (err) {
+    state.siteFailoverLogReady = false;
+    log(`[site-failover] not armed: ${err.message || err}; no restart or silent fallback`);
+    return false;
+  }
+}
+
+function recordSiteFailoverSignal(level, payload) {
+  if (!state.siteFailoverGuard) {
+    state.siteFailoverGuard = SmartProxySiteFailover.createGuard({
+      log,
+      settings: () => state.settings,
+      snapshot: () => ({ ready: state.mainCoreReady && state.siteFailoverLogReady && !state.closing,
+        node: state.currentNode, revision: state.siteFailoverRevision }),
+      candidates: async excluded => {
+        const group = await api(mainController(), MAIN_SECRET, `/proxies/${encodeURIComponent(state.settings.targetGroup)}`);
+        return SmartProxySiteFailover.rankHistoricalAlternates(state.subscriptionNodeCatalog, state.nodeCodexResults,
+          state.currentNode, Array.isArray(group?.all) ? group.all : [], excluded);
+      },
+      select: applySiteFailoverSelection
+    });
+  }
+  return state.siteFailoverGuard.ingest(level, payload);
+}
+
+async function applySiteFailoverSelection(node, context) {
+  const allowed = () => state.settings.siteFailoverEnabled === true && !state.closing && state.mainCoreReady
+    && state.siteFailoverRevision === context.revision && context.valid();
+  if (!allowed()) { log("[site-failover] selection cancelled: settings/manual intent changed"); return false; }
+  const groupName = state.settings.targetGroup;
+  const endpoint = `/proxies/${encodeURIComponent(groupName)}`;
+  const group = await api(mainController(), MAIN_SECRET, endpoint);
+  if (!allowed() || group?.now !== context.node || !group?.all?.includes(node)) {
+    log("[site-failover] selection cancelled: running group/current node changed or candidate absent"); return false;
+  }
+  // sing-box selector API hot-switches new connections; never reload config or restart.
+  await api(mainController(), MAIN_SECRET, endpoint, { method: "PUT", body: JSON.stringify({ name: node }) });
+  await updateCurrentNode();
+  if (state.currentNode !== node) { log("[site-failover] selector readback mismatch; no connections closed"); return false; }
+  renderProxyNodes();
+  if (state.siteFailoverRevision !== context.revision || !state.settings.siteFailoverEnabled) {
+    log("[site-failover] manual/settings change after selector write; preserving all connections"); return true;
+  }
+  try {
+    const snapshot = await api(mainController(), MAIN_SECRET, "/connections");
+    const targets = (snapshot?.connections || []).filter(c => {
+      const chains = (c.chains || []).map(String);
+      const host = String(c.metadata?.host || "").toLowerCase();
+      return host === context.host.toLowerCase() && chains.includes(context.node) && chains.includes(groupName)
+        && !chains.some(tag => /^(codex-probe|CodexProbe)/i.test(tag));
+    });
+    for (const c of targets) {
+      if (state.siteFailoverRevision !== context.revision || !state.settings.siteFailoverEnabled) {
+        log("[site-failover] remaining failed-site cleanup cancelled by manual/settings change"); break;
+      }
+      await api(mainController(), MAIN_SECRET, `/connections/${encodeURIComponent(c.id)}`, { method: "DELETE" })
+        .catch(err => log(`[site-failover] failed-site connection cleanup failed: ${err.message || err}`));
+    }
+    log(`[site-failover] hot switch readback verified; targeted old-site connections=${targets.length}; unrelated connections preserved`);
+  } catch (err) { log(`[site-failover] hot switch succeeded but targeted cleanup failed: ${err.message || err}`); }
+  return true;
+}
+
 // ---- 节点分组与抖动判别 ----
 
 function normalizeNodeGroupRules() {
@@ -5507,7 +5626,9 @@ async function boot() {
   state.pendingWindowShowReason = "";
   if (verifyWindowReady) {
     const surfaceReady = document.readyState !== "loading" && !!document.querySelector(".app")
-      && !!document.getElementById("removeOfflineYamlBtn") && document.getElementById("probeProfile")?.options.length === 2;
+      && !!document.getElementById("removeOfflineYamlBtn") && document.getElementById("probeProfile")?.options.length === 2
+      && !!document.getElementById("siteFailoverTargets") && !!document.getElementById("siteFailoverEnabled")
+      && typeof SmartProxySiteFailover !== "undefined" && typeof SmartProxySiteFailover.createGuard === "function";
     let probeResourcesReady = false;
     try {
       const dualModelScript = await dualModelProbeScriptPath();
@@ -5538,12 +5659,15 @@ async function boot() {
     await Neutralino.window.hide();
     const probeScript = await dualModelProbeScriptPath();
     const nodeRuntime = await resolveProbeNodeRuntime();
+    await syncSiteFailoverState("ui-handoff");
     const owner = await readInstanceJson(state.paths.instanceLock);
     if (Number(owner?.pid) !== state.handoffFromPid) throw new Error("UI handoff owner changed; refusing takeover");
     await Neutralino.filesystem.writeFile(state.paths.instanceLock, JSON.stringify({ ...state.instanceIdentity, at: Date.now() }));
     await Neutralino.filesystem.writeFile(await Neutralino.filesystem.getJoinedPath(state.paths.work, "ui-handoff-ready.json"),
       JSON.stringify({ pid: Number(state.instanceIdentity.pid), previousPid: state.handoffFromPid, build: APP_BUILD_ID,
-        attached: true, node: state.currentNode, probeLanes: state.probePortByTag.size, probeScript, nodeRuntime, at: Date.now() }));
+        attached: true, node: state.currentNode, probeLanes: state.probePortByTag.size, probeScript, nodeRuntime,
+        siteFailover: { enabled: state.settings.siteFailoverEnabled, logReady: state.siteFailoverLogReady,
+          sites: state.settings.siteFailoverTargets, uiReady: !!document.getElementById("siteFailoverTargets") }, at: Date.now() }));
     log("UI handoff ready; core and node unchanged; installer may retire the old UI process only");
   }
   else if (pendingWindowShowReason) {

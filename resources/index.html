@@ -223,6 +223,22 @@
             </section>
 
             <section class="settings-section span">
+              <div class="section-title"><h2>网站故障自动切换</h2></div>
+              <div class="settings-grid compact">
+                <label class="check-row"><input id="siteFailoverEnabled" type="checkbox">
+                  <span><b>连接中断时切换其他订阅</b><small>优先历史最佳 · 无历史则随机 · 不测速</small></span>
+                </label>
+                <label class="field wide">监测网站（每行一个域名，可填 HTTPS URL；含子域名）
+                  <textarea id="siteFailoverTargets" rows="3" placeholder="chatgpt.com&#10;api.example.com"></textarea>
+                </label>
+                <label class="field">故障次数 <input id="siteFailoverThreshold" type="number" min="1" max="10" value="2"></label>
+                <label class="field">统计窗口（秒） <input id="siteFailoverWindowSeconds" type="number" min="10" max="600" value="60"></label>
+                <label class="field">切换冷却（秒） <input id="siteFailoverCooldownSeconds" type="number" min="30" max="3600" value="180"></label>
+              </div>
+              <small>保存后立即生效，不重启内核。按连接 ID 关联网站与当前节点，排除直连、客户端取消与重复错误；默认 60 秒内 2 次触发、冷却 180 秒。跨订阅优先同一测速配置的历史冠军，没有可用历史则随机选其他订阅节点。只切换目标组并关闭故障网站的旧节点连接，其他连接保留。历史/随机节点不保证当前可用；再次故障会在冷却后继续处理。需核心 info 日志。</small>
+            </section>
+
+            <section class="settings-section span">
               <div class="section-title"><h2>节点分组与抖动熔断</h2></div>
               <div class="settings-grid compact">
                 <label class="check-row">
@@ -343,6 +359,7 @@
           "/js/neutralino.js",
           "/vendor/js-yaml.min.js",
           "/js/config-helpers.js",
+          "/js/site-failover.js",
           "/js/main.js"
         ];
         (function next(i) {

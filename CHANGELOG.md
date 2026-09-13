@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.0 - 2026-09-13
+
+- Add opt-in configurable website failure detection using correlated sing-box connection IDs, unique-error thresholds, a cooldown, and bounded state.
+- Hot-switch directly to another subscription's historical best; without valid history, randomly choose another subscription/node. No connectivity or model probes are issued by failover.
+- Exclude current/shared subscriptions, absent runtime nodes and cooling failures. Preserve unrelated live connections and cancel pending failover on manual selection or settings changes.
+- Reconnect the core log stream without restarting the proxy; log disabled/unarmed, random-fallback and no-candidate reasons. Add deterministic regression coverage.
+
 ## 1.1.0 - 2026-09-09
 
 - Cap the whole benchmark at four requests, with independent 30-second request timeouts and cooperative child-process cancellation.
