@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.1 - 2026-09-13
+
+- Make completed UI handoff idempotent across WebView reloads while still rejecting another lock owner.
+- Block settings writes before successful loading, block unready form saves, and revoke persistence after boot failure. Retain unreadable/malformed files rather than replacing them with defaults.
+- Preserve hidden reload intent and expose a hidden reload/health handshake for installation verification without touching the core.
+- Add regression tests for repeated reloads, stale handoff arguments, failed initialization, missing/corrupt settings and preservation of real subscription configuration.
+
 ## 1.2.0 - 2026-09-13
 
 - Add opt-in configurable website failure detection using correlated sing-box connection IDs, unique-error thresholds, a cooldown, and bounded state.

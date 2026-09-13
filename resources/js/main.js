@@ -3,7 +3,7 @@ const MAIN_CONTROLLER_TIMEOUT_MS = 8000;
 const MAIN_CORE_START_ATTEMPTS = 3;
 const MAIN_CORE_RETRY_DELAY_MS = 450;
 const APP_CONFIG_VERSION = 17;
-const APP_BUILD_ID = "2026-09-13-site-history-failover-v1.2.0";
+const APP_BUILD_ID = "2026-09-13-reload-settings-recovery-v1.2.1";
 const LOG_MAX_FILE_BYTES = 8 * 1024 * 1024;
 const LOG_MAX_BUFFER_BYTES = 256 * 1024;
 const LOG_FLUSH_MS = 500;
@@ -228,6 +228,7 @@ const state = {
   instanceSignalBusy: false,
   instanceSignalLast: "",
   uiReady: false,
+  settingsLoaded: false,
   pendingWindowShowReason: "",
   trayReady: false,
   systemNetworkOptimizeStatus: null,
@@ -650,6 +651,10 @@ function readActiveSubscriptionFromForm() {
 }
 
 function readSettingsFromForm() {
+  if (!state.settingsLoaded || !state.uiReady) {
+    log("Settings form save blocked: UI/settings not ready; existing file retained");
+    throw new Error("Settings form not ready");
+  }
   const s = state.settings;
   readActiveSubscriptionFromForm();
   s.configPath = $("configPath").value.trim();
@@ -1052,7 +1057,11 @@ async function ensureDefaultCorePaths() {
 }
 
 async function persistSettingsFile() {
-  if (!state.paths.settings) return;
+  if (!state.settingsLoaded) {
+    log("Settings write blocked: settings not initialized; existing file retained");
+    throw new Error("Settings not initialized");
+  }
+  if (!state.paths.settings) throw new Error("Settings path not initialized");
   const saved = JSON.parse(JSON.stringify(state.settings));
   ["singBoxPath", "configPath"].forEach((key) => {
     saved[key] = SmartProxyConfig.toPortableStoredPath({
@@ -1070,7 +1079,10 @@ function hydrateCodexProbeResults() {
 }
 
 function scheduleSettingsPersist(reason) {
-  if (!state.paths.settings || state.closing) return;
+  if (!state.settingsLoaded || !state.paths.settings || state.closing) {
+    log(`Settings persistence not scheduled (${reason || "runtime state"}): uninitialized, missing path or closing`);
+    return;
+  }
   if (state.settingsPersistTimer) clearTimeout(state.settingsPersistTimer);
   state.settingsPersistTimer = setTimeout(() => {
     state.settingsPersistTimer = null;
@@ -1221,16 +1233,26 @@ function saveSettingsFileOnly() {
 }
 
 async function loadSettings() {
+  state.settingsLoaded = false;
   let saved = {};
   let loadedFromFile = false;
   try {
-    if (state.paths.settings && await access(state.paths.settings)) {
+    if (!state.paths.settings || !state.paths.data) throw new Error("Missing settings paths");
+    // A successful parent listing distinguishes a new install from access/read
+    // failure; access() deliberately collapses errors and must not be used here.
+    const entries = await Neutralino.filesystem.readDirectory(state.paths.data);
+    const name = state.paths.settings.replace(/\\/g, "/").split("/").pop();
+    if (entries.some(entry => entry.entry === name)) {
       saved = JSON.parse(await readPortableTextFile(state.paths.settings));
+      if (!saved || typeof saved !== "object" || Array.isArray(saved)) throw new Error("Invalid settings object");
       loadedFromFile = true;
-    }
+    } else log("Settings file absent in readable data directory; initializing a new installation");
   }
-  catch {
-    saved = {};
+  catch (err) {
+    // JSON parser messages may contain subscription credentials. Log only the
+    // error code/type, never the source text; do not replace it with defaults.
+    log(`Settings load failed (${err.code || err.name || "read error"}); file retained and writes blocked`);
+    throw new Error("Settings load failed; existing file retained (no default overwrite)");
   }
   state.settings = SmartProxyConfig.mergeSettingsWithDefaultMigration(saved, DEFAULT_SETTINGS);
   const migration = SmartProxyConfig.migrateSettingsForAppVersion(state.settings, {
@@ -1252,10 +1274,11 @@ async function loadSettings() {
   if (!Array.isArray(state.settings.customRules)) state.settings.customRules = [];
   normalizeCustomRuleDefaults();
   normalizeNodeGroupRules();
-  await migrateLastNodeBootstrap();
   hydrateCodexProbeResults();
   const portableCorePathsChanged = await ensureDefaultCorePaths();
   writeSettingsToForm();
+  state.settingsLoaded = true;
+  await migrateLastNodeBootstrap();
   if (migration.clearRuntime) await clearGeneratedRuntimeConfig();
   if (!loadedFromFile || migration.changed || portableCorePathsChanged) {
     await persistSettingsFile().catch((err) => log(`Migrate settings file failed: ${err.message || err}`));
@@ -1382,6 +1405,14 @@ async function ensureSingleInstanceOrExit() {
   const lock = await readInstanceJson(state.paths.instanceLock);
   const handoffArg = (window.NL_ARGS || []).find(arg => /^--handoff-from-pid=\d+$/.test(arg));
   if (handoffArg) {
+    if (Number(lock?.pid) === Number(self.pid)) {
+      // NL_ARGS survive WebView reload. This process already owns the lock;
+      // the old one-shot handoff argument must not run a second takeover.
+      state.handoffFromPid = 0;
+      state.instanceIdentity = { pid: String(self.pid), exe: self.exe };
+      log("UI handoff already completed; reloading current owner without takeover");
+      return true;
+    }
     const previousPid = Number(handoffArg.split("=")[1]);
     if (!lock || Number(lock.pid) !== previousPid || previousPid === Number(self.pid)) throw new Error("UI handoff rejected: previous owner does not match lock");
     state.handoffFromPid = previousPid;
@@ -1434,6 +1465,11 @@ async function startInstanceSignalWatcher() {
       try {
         if (command.action === "health") ok = !!(state.uiReady && state.mainCoreReady && state.mainProcess);
         else if (command.action === "show") ok = await requestMainWindowShow("instance-command");
+        else if (command.action === "reload-hidden") {
+          ok = state.uiReady && state.settingsLoaded;
+          if (ok) setTimeout(() => reloadAppSurface("instance-command", { hidden: true }), 250);
+          else log("Hidden reload command declined: UI/settings not ready");
+        }
         else log(`Instance command ignored: unsupported action ${String(command.action).slice(0, 80)}`);
       }
       catch (err) {
@@ -1442,7 +1478,9 @@ async function startInstanceSignalWatcher() {
       await Neutralino.filesystem.writeFile(
         state.paths.instanceAck,
         JSON.stringify({ token: command.token, ok, at: Date.now(), pid: Number(state.instanceIdentity?.pid || 0),
-          build: APP_BUILD_ID, coreReady: !!state.mainCoreReady, node: state.currentNode })
+          build: APP_BUILD_ID, coreReady: !!state.mainCoreReady, node: state.currentNode,
+          settingsLoaded: state.settingsLoaded, subscriptions: state.settings.subscriptions.length,
+          siteFailoverEnabled: state.settings.siteFailoverEnabled, siteFailoverLogReady: state.siteFailoverLogReady })
       );
     }
     catch (err) {
@@ -5435,7 +5473,7 @@ async function onTrayMenuItemClicked(event) {
 // 轻量重启：只重载 webview 里的 JS/UI，sing-box 子进程完全不动。
 // 重载后 boot() 会走 attachExistingMainCore() 附着到仍在运行的内核，
 // 代理链路与现有连接不中断；--load-dir-res 让磁盘上的新代码直接生效。
-async function reloadAppSurface(reason = "user") {
+async function reloadAppSurface(reason = "user", options = {}) {
   try {
     log(`Reloading UI surface (core untouched): ${reason}`);
     // 停掉本上下文的定时器与竞赛，避免重载瞬间还有请求在飞
@@ -5450,7 +5488,8 @@ async function reloadAppSurface(reason = "user") {
     await sleep(120);
     // 带唯一参数跳转，连同 HTML 一起绕开缓存；脚本自身由 index.html 的
     // 动态注入器加时间戳，确保重载后跑的是磁盘上的最新代码。
-    window.location.replace(window.location.pathname + "?r=" + Date.now());
+    const hidden = options.hidden === true || !state.surfaceVisible;
+    window.location.replace(window.location.pathname + "?r=" + Date.now() + "&hidden=" + (hidden ? "1" : "0"));
     return true;
   }
   catch (err) {
@@ -5592,8 +5631,18 @@ async function restoreWindowPositionAfterOffscreenLaunch() {
   }
 }
 
+function handleBootFailure(err) {
+  state.uiReady = false;
+  state.settingsLoaded = false;
+  if (state.settingsPersistTimer) clearTimeout(state.settingsPersistTimer);
+  state.settingsPersistTimer = null;
+  stopCoreLogStream();
+  log(`Boot failed: ${err.message || err}; settings writes blocked, existing core untouched`);
+}
+
 async function boot() {
   const silentStartup = isSilentStartup();
+  const hiddenReload = new URLSearchParams(window.location.search || "").get("hidden") === "1";
   const verifyWindowReady = isWindowReadyVerificationMode();
   if (NL_MODE === "window") await Neutralino.window.hide().catch(() => {});
   await initPaths();
@@ -5669,6 +5718,10 @@ async function boot() {
         siteFailover: { enabled: state.settings.siteFailoverEnabled, logReady: state.siteFailoverLogReady,
           sites: state.settings.siteFailoverTargets, uiReady: !!document.getElementById("siteFailoverTargets") }, at: Date.now() }));
     log("UI handoff ready; core and node unchanged; installer may retire the old UI process only");
+  }
+  else if (hiddenReload) {
+    await Neutralino.window.hide();
+    log("UI reload ready (hidden); existing core retained");
   }
   else if (pendingWindowShowReason) {
     await showMainWindow(pendingWindowShowReason).catch((err) => log(`Deferred window show failed: ${err.message || err}`));
@@ -5792,5 +5845,5 @@ if (!window.__SMART_PROXY_TEST__) {
   Neutralino.events.on("trayIconDblClicked", onTrayIconOpenRequested);
   Neutralino.events.on("appClientConnect", onTrayIconOpenRequested);
   Neutralino.events.on("windowClose", onWindowClose);
-  boot().catch((err) => log(`Boot failed: ${err.message || err}`));
+  boot().catch(handleBootFailure);
 }
