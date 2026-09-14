@@ -250,8 +250,8 @@
                   <input id="jitterCooldownMinutes" type="number" min="1" max="120" step="1" class="interval-input">
                 </label>
                 <label class="check-row">
-                  <input id="autoRecoverOnEndpointFailure" type="checkbox" disabled>
-                  <span title="系统DNS与内核解析路径不同，A/AAAA诊断仅供参考，不会封禁节点、自动更新订阅或重启内核。需更新订阅时请使用更新按钮。"><b>入口诊断（仅提示）</b><small>DNS失败不再决定节点失效</small></span>
+                  <input id="autoRecoverOnEndpointFailure" type="checkbox" checked>
+                  <span title="测速中某订阅 ≥25% 节点连接级失败，或缓存超过机场声明的刷新周期（Profile-Update-Interval，默认 24 小时）时，后台拉取新订阅、比对入口并直连探测新入口；只写缓存并提醒，不重启内核、不切换节点。系统 DNS 的 A/AAAA 诊断仍只作提示。需要立即应用请点「更新当前订阅」。"><b>订阅自动更新</b><small>测速证据或到期后台拉取 · 只写缓存并提醒 · 不重启内核</small></span>
                 </label>
               </div>
               <div class="table-wrap compact-table">

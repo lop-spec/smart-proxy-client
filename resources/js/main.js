@@ -3,7 +3,7 @@ const MAIN_CONTROLLER_TIMEOUT_MS = 8000;
 const MAIN_CORE_START_ATTEMPTS = 3;
 const MAIN_CORE_RETRY_DELAY_MS = 450;
 const APP_CONFIG_VERSION = 17;
-const APP_BUILD_ID = "2026-09-13-reload-settings-recovery-v1.2.1";
+const APP_BUILD_ID = "2026-09-14-evidence-subscription-refresh-v1.2.2";
 const LOG_MAX_FILE_BYTES = 8 * 1024 * 1024;
 const LOG_MAX_BUFFER_BYTES = 256 * 1024;
 const LOG_FLUSH_MS = 500;
@@ -117,6 +117,13 @@ const ENDPOINT_DEAD_TTL_MS = 30 * 60 * 1000;
 // 自动拉新订阅并验证；新配置只写缓存并提醒，运行中的内核与节点不变。
 const ENDPOINT_AUTO_RECOVER_RATIO = 0.25;
 const ENDPOINT_AUTO_RECOVER_COOLDOWN_MS = 20 * 60 * 1000;
+// 订阅过期只认真实证据：测速里该订阅 ≥ RATIO 节点连接级失败，或缓存超过机场声明的
+// Profile-Update-Interval（默认 24h）。系统 DNS 诊断永远只是提示（见 refreshEndpointDnsHealth）。
+const SUBSCRIPTION_REFRESH_TICK_MS = 30 * 60 * 1000;
+const SUBSCRIPTION_REFRESH_FIRST_TICK_MS = 5 * 60 * 1000;
+const SUBSCRIPTION_REFRESH_DEFAULT_HOURS = 24;
+const ENTRY_TCP_PROBE_TIMEOUT_MS = 5000;
+const ENTRY_TCP_PROBE_MAX = 3;
 const OPENAI_DOMAIN_RULE = "chatgpt.com,openai.com,oaistatic.com,oaiusercontent.com,oaistatsig.com";
 const OPENAI_CUSTOM_RULE = {
   type: "DOMAIN-SUFFIX-SET",
@@ -275,7 +282,10 @@ const state = {
   endpointDnsCheckedAt: 0,
   endpointDnsBusy: false,
   autoRecoverBusy: false,
-  autoRecoverLastAt: 0,
+  subscriptionRefreshLastAt: new Map(),
+  subscriptionRefreshTimer: null,
+  subscriptionRefreshPromise: null,
+  subscriptionRefreshDisabledLogged: false,
   pendingConfigApply: null
 };
 
@@ -1901,6 +1911,8 @@ async function refreshSubscriptionNodeCatalog(options = {}) {
 }
 
 async function loadMergedCachedSubscriptionPoolForStartup() {
+  // 启动代理时节点池按缓存重建：后台预备的新订阅到此才真正生效。
+  state.pendingConfigApply = null;
   const catalog = await refreshSubscriptionNodeCatalog({ activeConfig: null });
   const sourceCount = state.subscriptionConfigs.size;
   if (
@@ -2381,6 +2393,8 @@ async function refreshSubscription() {
     else {
       if ($("subscriptionStatus")) $("subscriptionStatus").textContent = "订阅已更新";
       log(`Subscription refreshed via ${outcome.source}: ${state.nodes.length} candidate nodes`);
+      // 手动更新已把缓存应用到运行配置，后台预备的提醒随之完成。
+      if (state.pendingConfigApply && state.pendingConfigApply.profileId === state.settings.activeSubscriptionId) state.pendingConfigApply = null;
     }
     return outcome;
   }
@@ -4227,12 +4241,13 @@ async function testAllCodexNodes(options = {}) {
         // outcome may still be an account, environment, or cancellation failure.
       }
     });
-    const currentKeys = new Set(), gates = new Map();
+    const currentKeys = new Set(), gates = new Map(), roundResults = new Map();
     let failed = 0;
     for (const entry of entries) {
       const value = state.codexProbeCancelRequested ? { ok: false, failureScope: "cancelled", error: "测速已停止" }
         : tokMap.get(probePortForEntry(entry));
       const result = buildTokResult(entry, null, value);
+      roundResults.set(entry.key, result);
       const stored = storeCodexProbeResult(entry, result);
       if (result.status === "ok") currentKeys.add(entry.key); else failed++;
       gates.set(entry.key, { ok: null });
@@ -4246,6 +4261,8 @@ async function testAllCodexNodes(options = {}) {
     else log("Benchmark has no comparable three-sample winner; selection and connections unchanged");
     const benchmarkElapsedMs = Math.max(1, Date.now() - benchmarkStartedAt);
     log(`Benchmark completed: ${currentKeys.size}/${entries.length} measured, ${verifiedRanked.length} fully sampled finalists, ${failed} unfinished/failed, ${(benchmarkElapsedMs / 1000).toFixed(1)}s`);
+    evaluateBenchmarkSubscriptionEvidence(entries, roundResults,
+      { cancelled: state.codexProbeCancelRequested, channelFailure: !!tokMap.roundInfo?.channelFailure });
     return { total: entries.length, successful: currentKeys.size, reachable: currentKeys.size,
       finalists: verifiedRanked.length, verified: verifiedRanked.length, modelFailures: tokMap.roundInfo?.channelFailure ? failed : 0,
       cancelled: state.codexProbeCancelRequested, elapsedMs: benchmarkElapsedMs };
@@ -4427,123 +4444,157 @@ async function refreshEndpointDnsHealth(options = {}) {
 }
 
 // 针对单个订阅下载并落缓存（不动 active 订阅、不重启内核，纯网络操作）
-async function downloadSubscriptionForProfile(profile) {
+async function downloadSubscriptionForProfile(profile, label = "auto-refresh") {
   const url = String(profile && profile.url || "").trim();
   if (!url) return null;
   const path = await subscriptionCachePathFor(profile);
   const headersPath = await subscriptionHeadersCachePathFor(profile);
+  const name = profile.name || profile.id;
   let downloaded = null;
   try {
-    downloaded = await runSubscriptionDownloadAttempt({ url, label: "auto-recover direct", seconds: 12 });
+    downloaded = await runSubscriptionDownloadAttempt({ url, label: `${label} direct`, seconds: 12 });
   }
   catch (err) {
-    log(`Auto-recover direct download failed (${profile.name}): ${err.message || err}`);
+    log(`Subscription ${label} direct download failed (${name}): ${err.message || err}`);
   }
   if (!downloaded && state.mainProcess) {
     downloaded = await runSubscriptionDownloadAttempt({
-      url, label: "auto-recover via proxy", seconds: 30,
+      url, label: `${label} via proxy`, seconds: 30,
       proxyUrl: `http://127.0.0.1:${state.settings.mainPort}`
     }).catch((err) => {
-      log(`Auto-recover proxy download failed (${profile.name}): ${err.message || err}`);
+      log(`Subscription ${label} proxy download failed (${name}): ${err.message || err}`);
       return null;
     });
   }
   if (!downloaded) return null;
-  validateSubscriptionText(downloaded.configText, `订阅 ${profile.name || profile.id}`);
+  validateSubscriptionText(downloaded.configText, `订阅 ${name}`);
   await commitSubscriptionCache(downloaded, path, headersPath);
   await Neutralino.filesystem.writeFile(await subscriptionCacheSourcePathFor(profile), url);
   profile.cachedUrl = url;
   const temp = await subscriptionDownloadTempPaths();
   await Promise.all([removeFileIfExists(temp.config), removeFileIfExists(temp.headers)]);
-  return downloaded.configText;
+  return downloaded;
 }
 
-// 统计当前节点池里入口可解析的节点数（可用性上限）
-function liveEndpointNodeCount(catalog = state.subscriptionNodeCatalog) {
-  return catalog.filter((entry) => !entryEndpointDead(entry)).length;
-}
-
-async function autoRecoverFromEndpointFailure(deadHosts) {
-  if (state.autoRecoverBusy || state.subscriptionBusy) return null;
-  if (state.settings.autoRecoverOnEndpointFailure === false) return null;
-  const catalog = state.subscriptionNodeCatalog;
-  if (!catalog.length) return null;
-  const affected = catalog.length - liveEndpointNodeCount(catalog);
-  if (affected / catalog.length < ENDPOINT_AUTO_RECOVER_RATIO) return null;
-  if (state.autoRecoverLastAt && Date.now() - state.autoRecoverLastAt < ENDPOINT_AUTO_RECOVER_COOLDOWN_MS) return null;
-
-  state.autoRecoverBusy = true;
-  state.autoRecoverLastAt = Date.now();
-  const liveBefore = liveEndpointNodeCount(catalog);
+async function readCachedSubscriptionConfig(profile) {
+  const text = await readTextIfExists(await subscriptionCachePathFor(profile));
+  if (!text) return null;
   try {
-    // 受影响最重的订阅优先更新（死入口不一定属于当前 active 订阅）
-    const deadBySub = new Map();
-    for (const entry of catalog) {
-      if (!entryEndpointDead(entry)) continue;
-      deadBySub.set(entry.subscriptionId, (deadBySub.get(entry.subscriptionId) || 0) + 1);
-    }
-    const targets = normalizeSubscriptionSettings()
-      .filter((profile) => profile.url && deadBySub.get(profile.id))
-      .sort((left, right) => (deadBySub.get(right.id) || 0) - (deadBySub.get(left.id) || 0));
-    if (!targets.length) return null;
-    log(`Auto-recover: ${affected}/${catalog.length} nodes on dead entry hosts (${deadHosts.map((host) => host.slice(0, 24)).join(", ")}); refreshing ${targets.length} subscription(s)`);
-
-    let downloadedAny = false;
-    for (const profile of targets) {
-      const text = await downloadSubscriptionForProfile(profile).catch((err) => {
-        log(`Auto-recover download error (${profile.name}): ${err.message || err}`);
-        return null;
-      });
-      if (text) {
-        downloadedAny = true;
-        log(`Auto-recover downloaded fresh subscription: ${profile.name || profile.id}`);
-      }
-    }
-    if (!downloadedAny) {
-      log("Auto-recover aborted: no subscription could be downloaded");
-      return null;
-    }
-
-    // 试算新配置的可用节点数。注意：运行中的内核仍是旧配置，
-    // 所以算完必须把节点池恢复回去，否则界面会列出内核里根本不存在、
-    // 点了必然切换失败的"幽灵节点"。
-    const snapshot = {
-      catalog: state.subscriptionNodeCatalog,
-      configs: state.subscriptionConfigs,
-      merged: state.mergedSourceConfig,
-      nodes: state.nodes,
-      sourceConfig: state.sourceConfig,
-      sourceId: state.sourceConfigSubscriptionId
-    };
-    let liveAfter = liveBefore;
-    let newTotal = catalog.length;
-    try {
-      await refreshSubscriptionNodeCatalog({ activeConfig: null });
-      await refreshEndpointDnsHealth({ force: true, skipAutoRecover: true });
-      liveAfter = liveEndpointNodeCount();
-      newTotal = state.subscriptionNodeCatalog.length;
-    }
-    finally {
-      state.subscriptionNodeCatalog = snapshot.catalog;
-      state.subscriptionConfigs = snapshot.configs;
-      state.mergedSourceConfig = snapshot.merged;
-      state.nodes = snapshot.nodes;
-      state.sourceConfig = snapshot.sourceConfig;
-      state.sourceConfigSubscriptionId = snapshot.sourceId;
-    }
-    log(`Auto-recover result: usable nodes ${liveBefore} -> ${liveAfter} (total ${newTotal})`);
-    if (liveAfter <= liveBefore) {
-      log("Auto-recover: new subscription brings no additional usable node; keeping current core running");
-      renderProxyNodes();
-      return { improved: false, liveBefore, liveAfter };
-    }
-    state.pendingConfigApply = { at: Date.now(), liveBefore, liveAfter };
-    renderProxyNodes();
-    scheduleConfigApply();
-    return { improved: true, liveBefore, liveAfter };
+    return validateSubscriptionText(text, `订阅 ${profile.name || profile.id} 缓存`);
   }
   catch (err) {
-    log(`Auto-recover failed: ${err.message || err}`);
+    log(`Subscription cache unreadable for endpoint diff (${profile.name || profile.id}): ${err.message || err}`);
+    return null;
+  }
+}
+
+// ---- 订阅自动更新（按真实证据，不看系统 DNS）----
+// 证据只有两种：① 一轮测速里该订阅 ≥ ENDPOINT_AUTO_RECOVER_RATIO 的节点连接级(node-scope)失败；
+// ② 缓存年龄超过机场声明的 Profile-Update-Interval（默认 24h）。
+// 命中后：后台拉新订阅 → 比对入口 host:port 集合 → 直连 TCP 探测新入口 → 只写缓存并提醒。
+// 运行中的内核、当前节点、活动连接一律不动；应用新配置只发生在「更新当前订阅」或下次手动启动代理。
+// 2026-09-14 实例：lovenao 换中转域名但保留旧域名 DNS 记录，DNS 诊断永远“正常”，
+// 只有测速里 40/40 dial tcp i/o timeout 和线上订阅入口已变这两条证据能抓到。
+
+function preferDistinctHosts(endpoints) {
+  const seen = new Set();
+  const distinct = [];
+  const rest = [];
+  for (const endpoint of endpoints || []) {
+    const host = endpoint.slice(0, endpoint.lastIndexOf(":"));
+    (seen.has(host) ? rest : distinct).push(endpoint);
+    seen.add(host);
+  }
+  return distinct.concat(rest);
+}
+
+// 直连 TCP 探测入口 host:port，与内核拨号路径一致（绕过系统代理）。只回答“能否建立连接”。
+async function probeEntryEndpointsTcp(endpoints, timeoutMs = ENTRY_TCP_PROBE_TIMEOUT_MS) {
+  const targets = (endpoints || []).slice(0, ENTRY_TCP_PROBE_MAX);
+  if (!targets.length) return [];
+  const list = targets.map((endpoint) => psQuote(endpoint)).join(",");
+  const waitMs = Math.max(1000, Math.trunc(Number(timeoutMs) || ENTRY_TCP_PROBE_TIMEOUT_MS));
+  const script = `$ErrorActionPreference='SilentlyContinue';$out=@();foreach($t in @(${list})){`
+    + "$i=$t.LastIndexOf(':');$h=$t.Substring(0,$i);$p=[int]$t.Substring($i+1);"
+    + "$sw=[System.Diagnostics.Stopwatch]::StartNew();$ok=$false;"
+    + `try{$c=New-Object System.Net.Sockets.TcpClient;$ok=($c.ConnectAsync($h,$p).Wait(${waitMs}) -and $c.Connected);$c.Close()}catch{$ok=$false};`
+    + "$out+=[PSCustomObject]@{t=$t;ok=[bool]$ok;ms=[int]$sw.ElapsedMilliseconds}};"
+    + "ConvertTo-Json -InputObject @($out) -Compress";
+  const result = await Neutralino.os.execCommand(buildPowerShellExecCommand(script));
+  const raw = String(result && result.stdOut || "").trim();
+  if (!raw) throw new Error("entry TCP probe returned no data");
+  const parsed = JSON.parse(raw);
+  return (Array.isArray(parsed) ? parsed : [parsed]).map((row) => ({
+    endpoint: String(row && row.t || ""),
+    ok: !!(row && row.ok),
+    ms: Number(row && row.ms || 0)
+  }));
+}
+
+async function stageSubscriptionRefresh(profile, reason, evidence = "") {
+  if (!profile || !String(profile.url || "").trim()) return null;
+  const name = profile.name || profile.id;
+  const detail = evidence ? `: ${evidence}` : "";
+  if (state.settings.autoRecoverOnEndpointFailure === false) {
+    log(`Subscription auto-refresh disabled by settings; ${name} not refreshed (${reason}${detail})`);
+    return null;
+  }
+  if (state.autoRecoverBusy || state.subscriptionBusy) {
+    log(`Subscription auto-refresh skipped (${reason}) for ${name}: another subscription operation is running`);
+    return null;
+  }
+  const lastAt = state.subscriptionRefreshLastAt.get(profile.id) || 0;
+  if (lastAt && Date.now() - lastAt < ENDPOINT_AUTO_RECOVER_COOLDOWN_MS) {
+    const remaining = Math.ceil((ENDPOINT_AUTO_RECOVER_COOLDOWN_MS - (Date.now() - lastAt)) / 60000);
+    log(`Subscription auto-refresh skipped (${reason}) for ${name}: cooldown, ${remaining} min remaining`);
+    return null;
+  }
+  state.autoRecoverBusy = true;
+  state.subscriptionRefreshLastAt.set(profile.id, Date.now());
+  try {
+    log(`Subscription auto-refresh (${reason}) for ${name}${detail}`);
+    const previous = await readCachedSubscriptionConfig(profile) || state.subscriptionConfigs.get(profile.id) || null;
+    const downloaded = await downloadSubscriptionForProfile(profile, "auto-refresh");
+    if (!downloaded) {
+      log(`Subscription auto-refresh (${reason}) for ${name}: download failed; cache and running core unchanged`);
+      return { profileId: profile.id, name, reason, downloaded: false };
+    }
+    const next = validateSubscriptionText(downloaded.configText, `订阅 ${name}`);
+    const diff = SmartProxyConfig.diffSubscriptionEndpoints(previous, next);
+    const outcome = { profileId: profile.id, name, reason, downloaded: true, diff, reachable: [], unreachable: [] };
+    if (!diff.changed) {
+      const pending = state.pendingConfigApply;
+      if (pending && pending.profileId === profile.id) {
+        log(`Subscription auto-refresh (${reason}) for ${name}: upstream unchanged since the staged refresh; still waiting for 更新当前订阅 or a manual proxy start`);
+        if ($("subscriptionStatus")) $("subscriptionStatus").textContent = `${name} 新订阅已就绪：点「更新当前订阅」或下次手动启动代理生效`;
+      }
+      else {
+        log(`Subscription auto-refresh (${reason}) for ${name}: upstream entry endpoints unchanged (${diff.next}); cache and headers refreshed, nothing to apply`);
+      }
+      return outcome;
+    }
+    const probes = await probeEntryEndpointsTcp(preferDistinctHosts(diff.added)).catch((err) => {
+      log(`Entry TCP probe failed for ${name}: ${err.message || err}`);
+      return [];
+    });
+    outcome.reachable = probes.filter((probe) => probe.ok).map((probe) => probe.endpoint);
+    outcome.unreachable = probes.filter((probe) => !probe.ok).map((probe) => probe.endpoint);
+    const probeText = probes.map((probe) => `${probe.endpoint}=${probe.ok ? `${probe.ms}ms` : "fail"}`).join(", ") || "not probed";
+    log(`Subscription auto-refresh (${reason}) for ${name}: entry endpoints changed +${diff.added.length}/-${diff.removed.length}; new entries reachable ${outcome.reachable.length}/${probes.length} (${probeText})`);
+    if (!outcome.reachable.length) {
+      log(`Subscription auto-refresh (${reason}) for ${name}: new entries unreachable from this machine; cache updated, no apply reminder issued`);
+      return outcome;
+    }
+    state.pendingConfigApply = {
+      at: Date.now(), profileId: profile.id, name, reason,
+      added: diff.added.length, removed: diff.removed.length,
+      reachable: outcome.reachable.length, probed: probes.length
+    };
+    scheduleConfigApply();
+    return outcome;
+  }
+  catch (err) {
+    log(`Subscription auto-refresh (${reason}) for ${name} failed: ${err.message || err}; running core unchanged`);
     return null;
   }
   finally {
@@ -4551,14 +4602,88 @@ async function autoRecoverFromEndpointFailure(deadHosts) {
   }
 }
 
+// 测速轮结束后的证据评估：只用本轮 node-scope 失败，按订阅统计；账户/模型/本机/取消都不算。
+function evaluateBenchmarkSubscriptionEvidence(entries, roundResults, roundInfo = {}) {
+  if (roundInfo.cancelled) {
+    log("Benchmark subscription evidence skipped: round cancelled");
+    return null;
+  }
+  if (roundInfo.channelFailure) {
+    log("Benchmark subscription evidence skipped: account/model channel failure is not subscription evidence");
+    return null;
+  }
+  const evidence = SmartProxyConfig.subscriptionRefreshEvidence(entries, roundResults, {
+    ratio: ENDPOINT_AUTO_RECOVER_RATIO,
+    excludeIds: [LOCAL_YAML_SOURCE_ID]
+  });
+  if (!evidence.stale.length) return evidence;
+  const profiles = normalizeSubscriptionSettings();
+  const tasks = [];
+  for (const stat of evidence.stale) {
+    const profile = profiles.find((item) => item.id === stat.subscriptionId && String(item.url || "").trim());
+    if (!profile) continue;
+    tasks.push({
+      profile,
+      evidence: `${stat.nodeFailures}/${stat.total} node-level failures this round (>= ${Math.round(ENDPOINT_AUTO_RECOVER_RATIO * 100)}%)`
+    });
+  }
+  if (!tasks.length) return evidence;
+  state.subscriptionRefreshPromise = (async () => {
+    for (const task of tasks) await stageSubscriptionRefresh(task.profile, "benchmark", task.evidence);
+  })().catch((err) => log(`Benchmark subscription evidence failed: ${err.message || err}`))
+    .finally(() => { state.subscriptionRefreshPromise = null; });
+  return evidence;
+}
+
+// 按机场声明的刷新周期后台刷新缓存（Profile-Update-Interval，默认 24h）。
+async function subscriptionScheduledRefreshTick() {
+  if (state.closing || !state.settingsLoaded) return null;
+  if (state.settings.autoRecoverOnEndpointFailure === false) {
+    if (!state.subscriptionRefreshDisabledLogged) {
+      state.subscriptionRefreshDisabledLogged = true;
+      log("Scheduled subscription refresh disabled by settings; caches age without background updates");
+    }
+    return null;
+  }
+  state.subscriptionRefreshDisabledLogged = false;
+  const profiles = normalizeSubscriptionSettings().filter((profile) => String(profile.url || "").trim());
+  const outcomes = [];
+  for (const profile of profiles) {
+    const path = await subscriptionCachePathFor(profile);
+    let stats = null;
+    try { stats = await Neutralino.filesystem.getStats(path); }
+    catch { stats = null; }
+    if (!stats) continue;   // 从未下载过的订阅没有“年龄”，交给保存/更新按钮
+    const headersText = await readTextIfExists(await subscriptionHeadersCachePathFor(profile));
+    const hours = SmartProxyConfig.parseProfileUpdateIntervalHours(headersText, SUBSCRIPTION_REFRESH_DEFAULT_HOURS);
+    const modifiedAt = Number(stats.modifiedAt || 0);
+    const lastAt = state.subscriptionRefreshLastAt.get(profile.id) || 0;
+    const since = Math.max(modifiedAt, lastAt);
+    const ageMs = since ? Date.now() - since : Infinity;
+    if (ageMs < hours * 3600 * 1000) continue;
+    const ageText = Number.isFinite(ageMs) ? `${Math.round(ageMs / 3600000)}h` : "unknown";
+    outcomes.push(await stageSubscriptionRefresh(profile, "scheduled", `cache age ${ageText} >= interval ${hours}h`));
+  }
+  return outcomes;
+}
+
+function startSubscriptionRefreshScheduler() {
+  if (state.subscriptionRefreshTimer) return;
+  const tick = () => subscriptionScheduledRefreshTick()
+    .catch((err) => log(`Scheduled subscription refresh failed: ${err.message || err}`));
+  setTimeout(tick, SUBSCRIPTION_REFRESH_FIRST_TICK_MS);
+  state.subscriptionRefreshTimer = setInterval(tick, SUBSCRIPTION_REFRESH_TICK_MS);
+}
+
 function scheduleConfigApply() {
   const pending = state.pendingConfigApply;
   if (!pending || pending.notified) return;
   pending.notified = true;
-  log(`Refreshed subscription ready (${pending.liveBefore} -> ${pending.liveAfter} usable); running core unchanged, apply on next manual proxy start`);
+  log(`Refreshed subscription ready (${pending.name}: entry endpoints +${pending.added}/-${pending.removed}, ${pending.reachable}/${pending.probed} new entries reachable); running core unchanged, apply via 更新当前订阅 or next manual proxy start`);
+  if ($("subscriptionStatus")) $("subscriptionStatus").textContent = `${pending.name} 新订阅已就绪：点「更新当前订阅」或下次手动启动代理生效`;
   if (Neutralino.os && typeof Neutralino.os.showNotification === "function") {
     Neutralino.os.showNotification("Smart Proxy：新订阅已就绪",
-      `可用节点 ${pending.liveBefore} → ${pending.liveAfter}，当前代理不重启，下次手动启动时生效`).catch(() => {});
+      `${pending.name} 入口已变更（新增 ${pending.added}，可连通 ${pending.reachable}）；当前代理不重启，点「更新当前订阅」或下次手动启动时生效`).catch(() => {});
   }
 }
 
@@ -4846,6 +4971,7 @@ function startNodeGuard() {
     state.nodeGuardLast = { at: Date.now(), ok: null, skipped: true };
     log("Anthropic guard disabled: periodic requests and failure notifications are not scheduled");
   }
+  startSubscriptionRefreshScheduler();
   // Startup DNS diagnosis is advisory only and never an automatic escape trigger.
   setTimeout(() => { refreshEndpointDnsHealth({ force: true }).catch(err => log(`DNS diagnosis failed: ${err.message || err}`)); }, 3000);
 }

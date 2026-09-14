@@ -2100,6 +2100,62 @@ Write-Output ("cleared=" + (($targets | ForEach-Object { $_.ProcessId }) -join '
     };
   }
 
+  // ---- 订阅入口变更判定与自动更新证据（纯函数，供主逻辑与测试复用）----
+  function subscriptionEntryEndpoints(config) {
+    const proxies = Array.isArray(config && config.proxies) ? config.proxies : [];
+    const set = new Set();
+    for (const proxy of proxies) {
+      const server = String(proxy && proxy.server || "").trim().toLowerCase();
+      const port = Number(proxy && proxy.port);
+      if (!server || !Number.isFinite(port) || port <= 0) continue;
+      set.add(server + ":" + port);
+    }
+    return [...set];
+  }
+
+  function diffSubscriptionEndpoints(previousConfig, nextConfig) {
+    const previous = subscriptionEntryEndpoints(previousConfig);
+    const next = subscriptionEntryEndpoints(nextConfig);
+    const previousSet = new Set(previous);
+    const nextSet = new Set(next);
+    const added = next.filter((value) => !previousSet.has(value));
+    const removed = previous.filter((value) => !nextSet.has(value));
+    return { previous: previous.length, next: next.length, added, removed, changed: added.length > 0 || removed.length > 0 };
+  }
+
+  // 机场在响应头里声明刷新周期（小时）；缺失或非法时用默认值，钳在 1..168 小时。
+  function parseProfileUpdateIntervalHours(headersText, fallbackHours = 24) {
+    const fallback = Number.isFinite(Number(fallbackHours)) && Number(fallbackHours) > 0 ? Number(fallbackHours) : 24;
+    const match = String(headersText || "").match(/^\s*profile-update-interval\s*:\s*(\d+(?:\.\d+)?)\s*$/im);
+    const value = match ? Number(match[1]) : NaN;
+    if (!Number.isFinite(value) || value <= 0) return fallback;
+    return Math.min(168, Math.max(1, value));
+  }
+
+  // 一轮测速按订阅统计节点级(node-scope)失败。只有连接层面的失败才是订阅过期证据；
+  // model/local/round/cancelled 属于账户、本机或整轮问题，不归到任何订阅。
+  function subscriptionRefreshEvidence(entries, results, options = {}) {
+    const ratio = Number.isFinite(Number(options.ratio)) ? Number(options.ratio) : 0.25;
+    const exclude = new Set(options.excludeIds || []);
+    const read = typeof results === "function"
+      ? results
+      : (key) => (results && typeof results.get === "function" ? results.get(key) : (results ? results[key] : undefined));
+    const stats = new Map();
+    for (const entry of entries || []) {
+      const id = String(entry && entry.subscriptionId || "");
+      if (!id || exclude.has(id)) continue;
+      const stat = stats.get(id) || { subscriptionId: id, total: 0, nodeFailures: 0, successes: 0, otherFailures: 0 };
+      stat.total += 1;
+      const result = read(entry.key) || {};
+      if (result.status === "ok" || result.status === "done") stat.successes += 1;
+      else if (result.failureScope === "node") stat.nodeFailures += 1;
+      else stat.otherFailures += 1;
+      stats.set(id, stat);
+    }
+    const list = [...stats.values()].map((stat) => ({ ...stat, ratio: stat.total ? stat.nodeFailures / stat.total : 0 }));
+    return { ratio, stats: list, stale: list.filter((stat) => stat.nodeFailures > 0 && stat.ratio >= ratio) };
+  }
+
   const api = {
     applySmartProxyOverrides,
     buildCorePortCleanupScript,
@@ -2135,6 +2191,8 @@ Write-Output ("cleared=" + (($targets | ForEach-Object { $_.ProcessId }) -join '
     successfulCodexProbeResult,
     normalizeNodeLeagueStore,
     openAiCustomRule,
+    diffSubscriptionEndpoints,
+    parseProfileUpdateIntervalHours,
     parseSubscriptionTraffic,
     proxyIdentity,
     protectedProxyRules,
@@ -2153,6 +2211,8 @@ Write-Output ("cleared=" + (($targets | ForEach-Object { $_.ProcessId }) -join '
     sourceMode,
     subscriptionCacheFileNames,
     subscriptionConfigHasNodes,
+    subscriptionEntryEndpoints,
+    subscriptionRefreshEvidence,
     touchNodeLeagueCatalog,
     splitList,
     toPortableStoredPath,

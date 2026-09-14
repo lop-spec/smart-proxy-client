@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.2 - 2026-09-14
+
+- Replace the dead DNS-based subscription auto-recovery with evidence-based background refresh: a benchmark round where at least 25% of one subscription's nodes fail at the connection level, or a cache older than the provider's `Profile-Update-Interval` (default 24 h), downloads that subscription again in the background.
+- Compare the fresh subscription's entry host:port set against the cache, TCP-probe up to three new entry hosts directly, then only rewrite the cache and raise a reminder. The running core, selected node and live connections are never touched; the new configuration applies on 更新当前订阅 or the next manual proxy start.
+- Log every skip reason (disabled switch, cooldown, busy, download failure, unchanged upstream, unreachable new entries) instead of silently doing nothing. The 订阅自动更新 switch is honoured again; system DNS diagnostics stay advisory.
+
 ## 1.2.1 - 2026-09-13
 
 - Make completed UI handoff idempotent across WebView reloads while still rejecting another lock owner.
