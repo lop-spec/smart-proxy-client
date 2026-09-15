@@ -17,7 +17,7 @@
           </div>
           <div class="brand-copy">
             <strong>Smart Proxy</strong>
-            <span>1.3 · 网络工作台</span>
+            <span>1.4 · 流式质量测速</span>
           </div>
         </div>
 
@@ -140,7 +140,7 @@
         </section>
 
         <section id="view-proxy-nodes" class="view">
-          <header class="page-head"><div><span class="eyebrow">ROUTES</span><h1>节点工作台</h1><p>网络连通与模型服务分开判断，测试不改变当前连接。</p></div><button id="testNetworkBtn" class="primary">一键网络测试</button></header>
+          <header class="page-head"><div><span class="eyebrow">ROUTES</span><h1>节点工作台</h1><p>连通延迟、流式质量与下载吞吐分开判断，测试不改变当前连接。</p></div><button id="testNetworkBtn" class="primary">一键网络测试</button></header>
           <div class="probe-strip panel">
             <p id="networkScoreSummary" role="status">HTTPS 连通与延迟 · 无需模型账户，订阅过期仍可测试</p>
             <div class="toolbar-actions">
@@ -148,16 +148,18 @@
               <select id="nodeFilter" aria-label="筛选节点"><option value="all">全部节点</option><option value="reachable">网络可达</option><option value="current">当前节点</option></select>
             </div>
           </div>
-          <details class="model-options panel">
-            <summary>模型测速 <span>可选 · 消耗账户额度 · 单次初筛，前 3 名各复测 2 次</span></summary>
+          <details class="model-options panel" open>
+            <summary>Stream Quality <span>固定 SSE + 独立下载 · 不调用模型 · 全部缓存节点</span></summary>
             <div class="toolbar-actions">
-              <select id="probeProfile" aria-label="测速账户"><option value="codex">Codex · 主账户</option><option value="tokenmix">TokenMix · GPT-4o-mini</option></select>
-              <label class="field">Codex 模型 <input id="benchmarkCodexModel" value="gpt-5.5" placeholder="填账户支持的模型 ID"></label>
-              <button id="testAllCodexBtn">模型全测</button>
+              <select id="streamQualityRounds" aria-label="测速轮数"><option value="1">1 次初筛 · 每节点最多 8.1 MiB</option><option value="3">3 次交错复测 · 每节点最多 24.3 MiB</option></select>
+              <label class="field">HTTPS 测试端点 <input id="streamQualityEndpoint" type="url" value="https://stream-quality.1781297309.workers.dev" spellcheck="false"></label>
+              <button id="testAllCodexBtn">质量全测</button><button id="phoneQualityBtn">启动手机控制</button>
             </div>
-            <p id="nodeScoreSummary" role="status">实际 usage / 端到端耗时；不同模型成绩不直接比较。网络可达不代表账户支持此模型。</p>
+            <p>流式：约 5 KiB/s × 20 秒；下载：8 MiB 串行。独立核心与端口，不切日常节点。同工况流式达标并列；Mbps 不是 tok/s，不代表模型可用性。</p>
+            <div id="phonePairing" hidden><label class="field">本机执行层 <input id="phoneLocalUrl" readonly></label><label class="field">本次配对码 <input id="phonePairCode" type="password" readonly autocomplete="off"></label><button id="copyPhonePairCode">复制配对码</button><p>手机打开 https://lop-spec.github.io/stream-quality/，填入此电脑的私人 HTTPS 地址与配对码。地址可由 Tailscale Serve 等提供；手机不能使用电脑的 127.0.0.1。手机控制期间暂停本地测速，不影响日常代理。停止控制将取消实际任务、关闭独立核心并使配对码失效。</p></div>
+            <p id="nodeScoreSummary" role="status">旧模型成绩原样保留在历史数据中，不参与新榜单。</p>
           </details>
-          <div class="node-column-head"><span>节点 / 订阅</span><span>网络延迟</span><span>模型速度</span><span>手动操作</span></div>
+          <div class="node-column-head"><span>节点 / 订阅</span><span>网络延迟</span><span>流式 / 下载</span><span>手动操作</span></div>
           <div id="nodeGroups" class="node-groups"></div>
         </section>
 
@@ -388,6 +390,8 @@
           "/js/config-helpers.js",
           "/js/site-failover.js",
           "/js/network-probe.js",
+          "/scripts/stream-quality.js",
+          "/js/stream-quality-job.js",
           "/js/main.js"
         ];
         (function next(i) {

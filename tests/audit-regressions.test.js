@@ -17,7 +17,8 @@ function app() {
     window: { __SMART_PROXY_TEST__: true, confirm: () => true },
     setTimeout: fn => { timers.set(++nextTimer, fn); return nextTimer; }, clearTimeout: id => timers.delete(id),
     setInterval: fn => { timers.set(++nextTimer, fn); return nextTimer; }, clearInterval: id => timers.delete(id),
-    SmartProxyConfig: { ...helpers }, Neutralino: { filesystem: {}, os: {} },
+    SmartProxyConfig: { ...helpers }, StreamQuality: require('../resources/scripts/stream-quality.js'),
+    SmartProxyStreamQuality: require('../resources/js/stream-quality-job.js'), Neutralino: { filesystem: {}, os: {} },
     document: { hidden: false, getElementById(id) { if (!elements.has(id)) elements.set(id, { value: "", innerHTML: "", textContent: "", classList: { toggle() {} } }); return elements.get(id); } }
   });
   vm.runInContext(source, context);
@@ -119,7 +120,7 @@ test("P2: storing N scores performs O(N), not O(N^2), normalization", () => {
   a.context.good=success;
   a.run('for(let i=0;i<166;i++) state.nodeCodexResults.set(String(i),good); for(let i=0;i<166;i++) storeCodexProbeResult({key:String(i)},good)');
   assert.ok(count<=166,`normalized ${count} records`);
-  assert.equal(a.run('Object.keys(state.settings.codexProbeStore.results).length'),166);
+  assert.equal(a.run('Object.keys(state.settings.streamQualityStore.results).length'),166);
 });
 test("P8: controller reads have an abort signal and overlapping polls coalesce", async () => {
   const a=app(); let calls=0, release;
@@ -207,16 +208,18 @@ test("UI handoff authenticates previous lock owner and never kills it during ver
 });
 test("native helper cancellation reaches stdin and removes its event listener", async () => {
   const a=app();let listener=null,cancels=0;
-  a.run('dualModelProbeScriptPath=async()=>"C:/fixture/helper.js";resolveProbeNodeRuntime=async()=>"C:/portable Pi/runtime/node.exe"');
+  a.run('dualModelProbeScriptPath=async()=>"C:/fixture/helper.js";resolveProbeNodeRuntime=async()=>"C:/portable Pi/runtime/node.exe";selectedCorePath=()=>"C:/fixture/sing-box.exe";');
+  a.context.Neutralino.filesystem={getJoinedPath:async(...parts)=>parts.join('/'),writeFile:async()=>{},remove:async()=>{}};
+  a.context.SmartProxyConfig.buildSingBoxConfig=()=>({outbounds:[{type:'direct',tag:'test-node'}]});
   a.context.Neutralino.events={on:async(_name,fn)=>{listener=fn},off:async()=>{listener=null}};
   a.context.Neutralino.os={spawnProcess:async command=>{assert.ok(command.startsWith('"C:/portable Pi/runtime/node.exe" '));return {id:101,pid:202};},updateSpawnedProcess:async(id,action,data)=>{
     assert.equal(id,101);assert.equal(action,'stdIn');assert.equal(JSON.parse(data).action,'cancel');cancels++;
-    listener({detail:{id:101,action:'stdOut',data:JSON.stringify({type:'result',ok:true,cancelled:true,outcomes:[{port:40919,value:{ok:false,failureScope:'cancelled'}}]})+'\n'}});
+    listener({detail:{id:101,action:'stdOut',data:JSON.stringify({type:'result',ok:true,cancelled:true,outcomes:[{key:'test-key',value:{ok:false,failureScope:'cancelled'}}]})+'\n'}});
     listener({detail:{id:101,action:'exit',data:0}});
   }};
-  const pending=a.run('runBatchTokProbe([{port:40919}])');await new Promise(resolve=>setImmediate(resolve));
+  const pending=a.run('runBatchTokProbe([{entry:{key:"test-key",tag:"test-node"}}])');await new Promise(resolve=>setImmediate(resolve));
   await a.run('requestCodexProbeCancel()');const result=await pending;
-  assert.equal(cancels,1);assert.equal(result.get(40919).failureScope,'cancelled');assert.equal(listener,null);assert.equal(a.run('state.probeJob'),null);
+  assert.equal(cancels,1);assert.equal(result.get('test-key').failureScope,'cancelled');assert.equal(listener,null);assert.equal(a.run('state.probeJob'),null);
 });
 test("Node discovery uses a validated absolute runtime rather than bare node.exe", async () => {
   const a=app();a.run('bundledProbeScriptPath=async()=>"C:/app/resolve-node.ps1";buildPowerShellExecCommand=x=>x;state.paths.appRoot="C:/app";');

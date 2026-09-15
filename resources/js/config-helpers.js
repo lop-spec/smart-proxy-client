@@ -827,6 +827,11 @@
   const CODEX_PROBE_STORE_VERSION = 1;
 
   function successfulCodexProbeResult(value) {
+    if (value?.metricKind === "stream-quality-v1") return value.status === "done" && value.ok === true
+      && value.stream?.ok === true && value.download?.ok === true
+      && Number.isFinite(value.download.mbps) && value.download.mbps > 0
+      && ["firstSampleMs", "jitterMs", "maxExtraGapMs", "burstRatio"].every(key => Number.isFinite(value.stream[key]) && value.stream[key] >= 0)
+      && !!value.profileKey;
     const requestedModel = String(value && value.requestedModel || "");
     const resolvedModel = String(value && value.resolvedModel || "");
     return !!value
@@ -849,6 +854,18 @@
     } : null;
     if (!successfulCodexProbeResult(value)) return lastAttempt ? { status: lastAttempt.status, lastAttempt } : null;
     const number = (key) => Math.max(0, Number(value[key]) || 0);
+    if (value.metricKind === "stream-quality-v1") {
+      const numeric = (object, keys) => Object.fromEntries(keys.map(key => [key, Math.max(0, Number(object?.[key]) || 0)]));
+      return { metricKind: "stream-quality-v1", ok: true, status: "done", node: String(value.node || "").slice(0, 500),
+        endpoint: String(value.endpoint || "").slice(0, 500), location: String(value.location || "").slice(0, 100),
+        profileKey: String(value.profileKey || "").slice(0, 800), roundId: String(value.roundId || ""),
+        measuredAt: number("measuredAt"), sampleCount: number("sampleCount"), successfulSamples: number("successfulSamples"),
+        successRate: number("successRate"), verified: value.verified === true, lastAttempt,
+        routeVerification: "isolated-node-lane", gateSkipped: true, anthropicOk: null,
+        stream: { ...numeric(value.stream, ["firstSampleMs", "deliveryMs", "jitterMs", "p95ExtraGapMs", "maxExtraGapMs", "longestGapMs", "stallCount", "tailGrowthMs", "burstRatio", "sourceSlipMs", "receivedSamples", "streamBytes"]), ok: true, flowPass: value.stream.flowPass === true },
+        download: { ...numeric(value.download, ["bytes", "elapsedMs", "transferMs", "mbps", "endToEndMbps"]), ok: true, shortSample: value.download.shortSample === true },
+        samples: Array.isArray(value.samples) ? value.samples.slice(-3) : [] };
+    }
     return {
       status: "done",
       node: String(value.node || "").slice(0, 500),
@@ -930,6 +947,10 @@
 
   function codexProbeRank(result) {
     if (!result) return { band: 2, tok: 0, ttft: Infinity, delay: Infinity, model: "" };
+    if (result.metricKind === "stream-quality-v1" && successfulCodexProbeResult(result)) {
+      return { band: result.stream.flowPass ? 0 : 1, tok: 0,
+        ttft: result.stream.flowPass ? Infinity : result.stream.jitterMs, delay: Infinity, model: "stream-quality-v1" };
+    }
     if (result.status === "done" && result.anthropicOk === false) {
       return { band: 4, tok: 0, ttft: Infinity, delay: Infinity, model: "" };
     }
@@ -984,6 +1005,7 @@
       const value = codexProbeResultFor(results, key);
       return !!key && gateFor(key)?.ok !== false && hasCurrentTok(key)
         && successfulCodexProbeResult(value) && value.verified === true
+        && (value.metricKind !== "stream-quality-v1" || value.stream.flowPass === true)
         && value.sampleCount >= 3 && value.successRate === 1 && !!value.profileKey
         && (!value.lastAttempt || value.lastAttempt.status === "done");
     });

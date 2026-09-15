@@ -74,7 +74,12 @@ for (const file of resourcePaths) {
 const embeddedPayloads = [
   assertEmbeddedPayload("sing-box runtime", join(root, "resources", "bin", "sing-box.exe")),
   assertEmbeddedPayload("Codex subscription probe helper", join(root, "resources", "scripts", "codex-subscription-probe.ps1")),
-  assertEmbeddedPayload("dual-model probe helper", join(root, "resources", "scripts", "dual-model-probe.js")),
+  assertEmbeddedPayload("dual-model probe helper (legacy archive)", join(root, "resources", "scripts", "dual-model-probe.js")),
+  assertEmbeddedPayload("Stream Quality protocol", join(root, "resources", "scripts", "stream-quality.js")),
+  assertEmbeddedPayload("Stream Quality runner", join(root, "resources", "scripts", "stream-quality-runner.cjs")),
+  assertEmbeddedPayload("Stream Quality private controller", join(root, "resources", "scripts", "controller.cjs")),
+  ...["index.html", "app.js", "controller.js", "style.css"].map(file => assertEmbeddedPayload(`Stream Quality mobile ${file}`, join(root, "resources", "scripts", "web", file))),
+  assertEmbeddedPayload("Stream Quality lifecycle adapter", join(root, "resources", "js", "stream-quality-job.js")),
   assertEmbeddedPayload("core updater", join(root, "resources", "scripts", "core-manager.ps1")),
   assertEmbeddedPayload("account-free network probe", join(root, "resources", "js", "network-probe.js")),
   assertEmbeddedPayload("Node runtime resolver", join(root, "resources", "scripts", "resolve-node.ps1")),
@@ -145,9 +150,14 @@ try {
           join(extractedRoot, "scripts", "codex-subscription-probe.ps1")
         ),
         assertExtractedPayload(
-          "dual-model probe helper",
-          join(root, "resources", "scripts", "dual-model-probe.js"),
-          join(extractedRoot, "scripts", "dual-model-probe.js")
+          "Stream Quality runner",
+          join(root, "resources", "scripts", "stream-quality-runner.cjs"),
+          join(extractedRoot, "scripts", "stream-quality-runner.cjs")
+        ),
+        assertExtractedPayload(
+          "Stream Quality protocol",
+          join(root, "resources", "scripts", "stream-quality.js"),
+          join(extractedRoot, "scripts", "stream-quality.js")
         ),
         assertExtractedPayload(
           "core updater",

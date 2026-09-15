@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.0 - 2026-09-15
+
+- Replace active model benchmarks with the standalone open-source Stream Quality protocol/runner: no model calls, no account inputs, fixed 20-second SSE and separate bounded 8 MiB download.
+- Measure all deduplicated cached nodes through an owned isolated sing-box with ephemeral per-node lanes, without a running daily core, selector changes, TUN, system-proxy changes or connection clearing.
+- Support single-pass screening or three serial interleaved rounds; validate actual source cadence, complete frames and endpoint location. Passing fixed flows tie; Mbps never becomes tok/s.
+- Preserve old model history unchanged in its existing store; new independent results retain previous success after errors/cancellation. Website failover accepts verified same-profile streaming history.
+- Ship the pinned upstream protocol/runner plus lifecycle adapter, with cancellation, isolation, measurement and artifact regressions.
+
 ## 1.3.0 - 2026-09-15
 
 - Separate account-free HTTPS node testing from optional model throughput testing. Preserve provider error detail; unsupported models and rejected requests no longer count as broken nodes. Expose the Codex model explicitly, defaulting to gpt-5.5.

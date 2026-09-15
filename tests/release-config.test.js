@@ -125,7 +125,8 @@ test("portable runtime verification requires extraction only after WebView readi
   assert.match(verifier, /if \(runtime\.mode === "window-ready"\)/);
   assert.match(verifier, /verified: false[\s\S]*does not execute the WebView extraction path/);
   assert.match(verifier, /join\(isolated, "smart-proxy-data", "runtime", "probe-resources"\)/);
-  assert.match(verifier, /join\(extractedRoot, "scripts", "dual-model-probe\.js"\)/);
+  assert.match(verifier, /join\(extractedRoot, "scripts", "stream-quality-runner\.cjs"\)/);
+  assert.match(verifier, /join\(extractedRoot, "scripts", "stream-quality\.js"\)/);
   assert.match(verifier, /join\(extractedRoot, "scripts", "codex-subscription-probe\.ps1"\)/);
   assert.match(verifier, /join\(extractedRoot, "js", "config-helpers\.js"\)/);
 });

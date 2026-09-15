@@ -49,9 +49,13 @@
     const rows = alternatives.flatMap(entry => {
       const node = entry.tag || entry.node;
       const result = results instanceof Map ? results.get(entry.key) : results?.[entry.key];
-      if (!result || result.status !== "done" || !(result.tokPerSec > 0) || !Number.isFinite(result.tokPerSec)
+      const streamQuality = result?.metricKind === "stream-quality-v1";
+      const metricValid = streamQuality ? result.ok === true && result.stream?.ok === true && result.stream.flowPass === true
+        && result.download?.ok === true && Number.isFinite(result.download.mbps) && result.download.mbps > 0
+        : result?.tokPerSec > 0 && Number.isFinite(result.tokPerSec) && result.resolvedModelVerified === true
+          && !!result.requestedModel && result.requestedModel === result.resolvedModel;
+      if (!result || result.status !== "done" || !metricValid
         || !result.profileKey || !result.measuredAt || !result.verified || result.sampleCount < 3 || result.successRate !== 1
-        || result.resolvedModelVerified !== true || !result.requestedModel || result.requestedModel !== result.resolvedModel
         || result.anthropicOk === false || result.lastAttempt?.failureScope === "node" && result.lastAttempt.status !== "done") return [];
       return [{ entry, node, result }];
     });
@@ -65,7 +69,8 @@
     }
     // Use the most recently measured profile, never compare disjoint tok/s scales.
     const profile = [...rows].sort((a,b) => b.result.measuredAt-a.result.measuredAt)[0].result.profileKey;
-    const ranked = rows.filter(row => row.result.profileKey === profile).sort((a,b) => b.result.tokPerSec-a.result.tokPerSec
+    const ranked = rows.filter(row => row.result.profileKey === profile).sort((a,b) =>
+      (a.result.metricKind === "stream-quality-v1" ? 0 : b.result.tokPerSec-a.result.tokPerSec)
       || b.result.measuredAt-a.result.measuredAt || a.node.localeCompare(b.node));
     const chosenSubs = new Set();
     const champions = ranked.filter(row => {

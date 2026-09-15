@@ -3,7 +3,7 @@ const MAIN_CONTROLLER_TIMEOUT_MS = 8000;
 const MAIN_CORE_START_ATTEMPTS = 3;
 const MAIN_CORE_RETRY_DELAY_MS = 450;
 const APP_CONFIG_VERSION = 17;
-const APP_BUILD_ID = "2026-09-15-network-core-workspace-v1.3.0";
+const APP_BUILD_ID = "2026-09-15-stream-quality-v1.4.0";
 const LOG_MAX_FILE_BYTES = 8 * 1024 * 1024;
 const LOG_MAX_BUFFER_BYTES = 256 * 1024;
 const LOG_FLUSH_MS = 500;
@@ -35,7 +35,8 @@ const CODEX_TOK_PROBE_MODEL = "gpt-5.5";
 const CODEX_TOK_PROBE_TIMEOUT_S = 30;
 const CODEX_TOK_PROBE_HOMES_ROOT = "C:/Users/lop/Documents/claude/vscodium/homes";
 const CODEX_TOK_PROBE_SCRIPT = "codex-subscription-probe.ps1";
-const TOK_PROBE_BATCH_SCRIPT = "dual-model-probe.js";
+const TOK_PROBE_BATCH_SCRIPT = "stream-quality-runner.cjs";
+const STREAM_QUALITY_ENDPOINT = "https://stream-quality.1781297309.workers.dev";
 const TOKENMIX_TOK_PROBE_URL = "https://api.tokenmix.ai/v1/chat/completions";
 const TOKENMIX_TOK_PROBE_HOST = "api.tokenmix.ai";
 const TOKENMIX_TOK_PROBE_KEY_FILE = "C:/Users/lop/Documents/Codex/共享文件夹/gpt账号.txt";
@@ -176,7 +177,10 @@ const DEFAULT_SETTINGS = {
   lastSelectedNodeKey: "",
   lastSelectedNodeTag: "",
   codexProbeStore: { version: 1, updatedAt: 0, results: {} },
-  benchmarkProfile: "codex",
+  streamQualityStore: { version: 1, updatedAt: 0, results: {} },
+  streamQualityEndpoint: STREAM_QUALITY_ENDPOINT,
+  streamQualityRounds: 1,
+  benchmarkProfile: "codex", // legacy settings retained, no longer used by the UI
   benchmarkCodexModel: CODEX_TOK_PROBE_MODEL,
   networkProbeStore: {},
   subscriptionRefreshStatus: {},
@@ -727,8 +731,8 @@ function writeSettingsToForm() {
     if ($(key)) $(key).value = state.settings[key];
   }
   renderSubscriptionControls();
-  if ($("probeProfile")) $("probeProfile").value = state.settings.benchmarkProfile || "codex";
-  if ($("benchmarkCodexModel")) $("benchmarkCodexModel").value = state.settings.benchmarkCodexModel || CODEX_TOK_PROBE_MODEL;
+  if ($("streamQualityRounds")) $("streamQualityRounds").value = String(state.settings.streamQualityRounds || 1);
+  if ($("streamQualityEndpoint")) $("streamQualityEndpoint").value = state.settings.streamQualityEndpoint || STREAM_QUALITY_ENDPOINT;
   renderSubscriptionRefreshStatus();
   if ($("removeOfflineYamlBtn")) $("removeOfflineYamlBtn").disabled = !state.settings.configPath;
   if ($("autoStartSilent")) $("autoStartSilent").checked = !!state.settings.autoStartSilent;
@@ -1068,8 +1072,9 @@ async function persistSettingsFile() {
 }
 
 function hydrateCodexProbeResults() {
-  const store = SmartProxyConfig.normalizeCodexProbeStore(state.settings.codexProbeStore);
-  state.settings.codexProbeStore = store;
+  const store = SmartProxyConfig.normalizeCodexProbeStore(state.settings.streamQualityStore);
+  state.settings.streamQualityStore = store;
+  // codexProbeStore remains untouched as the legacy model-history archive.
   state.nodeCodexResults = new Map(Object.entries(store.results));
 }
 
@@ -1087,13 +1092,13 @@ function scheduleSettingsPersist(reason) {
 
 function syncCodexProbeStore(options = {}) {
   const results = Object.fromEntries(state.nodeCodexResults);
-  state.settings.codexProbeStore = SmartProxyConfig.normalizeCodexProbeStore({
+  state.settings.streamQualityStore = SmartProxyConfig.normalizeCodexProbeStore({
     version: 1,
     updatedAt: Date.now(),
     results
   });
-  if (options.persist !== false) scheduleSettingsPersist("Codex probe results");
-  return state.settings.codexProbeStore;
+  if (options.persist !== false) scheduleSettingsPersist("Stream Quality results");
+  return state.settings.streamQualityStore;
 }
 
 function restorableNodeEntry() {
@@ -3458,20 +3463,14 @@ async function selectCatalogNode(key, options = {}) {
 }
 
 function nodeCodexPresentation(entry, key) {
-  const tok = Number(entry?.tokPerSec || 0);
-  if (state.codexProbePendingKeys.has(key)) return { text: state.codexProbeCancelRequested ? "停止中" : "测速中", className: "pending", title: "固定模型/账户；历史成绩保留；再次点击可取消" };
-  if (!entry) return { text: "未测", className: "idle", title: "实际 usage / 请求至最后正文耗时；不代表纯模型解码速度或 Claude 可达性" };
-  const attempt = entry.lastAttempt;
-  const stale = attempt && attempt.status !== "done";
-  const scope = { model: "模型/账户", local: "本机探测环境", round: "整轮环境", node: "本次节点请求", measurement: "测量完整性", cancelled: "用户取消" };
-  const detail = stale ? `；最新状态：${scope[attempt.failureScope] || attempt.status}，${attempt.error || "未完成"}` : "";
-  const samples = Number(entry.sampleCount || 0);
-  const quality = entry.verified ? `${entry.successfulSamples}/${samples} 次成功，中位数速度；范围 ${Number(entry.tokMin || 0).toFixed(1)}–${Number(entry.tokMax || 0).toFixed(1)} tok/s`
-    : samples > 1 ? `${entry.successfulSamples}/${samples} 次成功，不稳定，不定冠军` : samples ? "单次初筛，不作为稳定冠军" : "旧口径历史值，不参与新榜单";
-  const measured = entry.measuredAt ? new Date(entry.measuredAt).toLocaleString() : "未知时间";
-  return { text: tok > 0 ? `${tok.toFixed(1)} tok/s${stale ? " 历史" : ""}` : stale ? "本次未通过" : "未测",
-    className: stale || !tok ? "idle" : entry.verified ? "fast" : "medium",
-    title: `${entry.resolvedModel || "未知模型"} / ${entry.probeModelId || "旧账户口径"}；${quality}；端到端有效吞吐（非纯解码速率）；首正文 TTFT中位数 ${Math.round(entry.tokTtftMedianMs || entry.tokTtftMs || 0)} ms；实际 usage ${entry.tokenCountSource === "api-usage" ? entry.tokEst : "未验证"} tokens；测量于 ${measured}${detail}；Anthropic 可达性未测量` };
+  if (state.codexProbePendingKeys.has(key)) return { text: state.codexProbeCancelRequested ? "停止中" : "测速中", className: "busy", title: "独立通道；固定 SSE + 串行下载；不消耗模型额度；历史保留" };
+  const stale = entry?.lastAttempt && entry.lastAttempt.status !== "done";
+  if (entry?.metricKind !== "stream-quality-v1" || !entry.download) return { text: stale ? entry.lastAttempt.status === "cancelled" ? "已停止" : "本次未通过" : "未测", className: "muted", title: entry?.lastAttempt?.error || "标准流式质量与下载测速，不代表模型速度" };
+  const { stream, download } = entry;
+  const quality = `${entry.successfulSamples}/${entry.sampleCount} 次完整成功${entry.verified ? " · 复测" : " · 初筛/未验证"}`;
+  return { text: `${stream.flowPass ? "流稳" : "有波动"} · ${download.mbps.toFixed(1)} Mbps${stale ? " 历史" : ""}`,
+    className: stale ? "muted" : stream.flowPass ? "fast" : "medium",
+    title: `${entry.endpoint} / ${entry.location}；${quality}；首段 ${stream.firstSampleMs.toFixed(0)} ms；抖动 ${stream.jitterMs.toFixed(0)} ms；额外停顿最大 ${stream.maxExtraGapMs.toFixed(0)} ms；攒包 ${(stream.burstRatio * 100).toFixed(1)}%；${download.shortSample ? "下载不足1秒，短样本，不代表带宽上限；" : ""}测于 ${new Date(entry.measuredAt).toLocaleString()}${stale ? `；最新：${entry.lastAttempt.error || entry.lastAttempt.status}` : ""}；不是 tok/s` };
 }
 
 
@@ -3545,7 +3544,8 @@ async function codexSubscriptionProbeScriptPath() {
 }
 
 async function dualModelProbeScriptPath() {
-  return bundledProbeScriptPath(TOK_PROBE_BATCH_SCRIPT, "Dual-model probe helper");
+  await bundledProbeScriptPath("stream-quality.js", "Stream Quality protocol");
+  return bundledProbeScriptPath(TOK_PROBE_BATCH_SCRIPT, "Stream Quality runner");
 }
 
 async function resolveProbeNodeRuntime() {
@@ -3566,12 +3566,15 @@ async function resolveProbeNodeRuntime() {
 
 async function ensureCodexProbeReady() {
   if (state.networkProbeJob) throw new Error("网络测试正在运行，请先停止它");
-  if (state.codexProbeLanesDisabled) throw new Error("探测端口被占用；主代理已降级启动，当前不能测速");
-  const live = state.mainCoreReady
-    || await probeControllerLive(mainController(), MAIN_SECRET, 700).catch(() => false);
-  if (!live) throw new Error("请先启动代理；测速不会再启动额外内核");
-  if (!state.probePortByTag.size) throw new Error("主内核尚未加载静态探测通道，请重新启动代理后再测速");
-  return true;
+  if (state.phoneProbeController || state.phoneProbeStarting) throw new Error("手机控制模式占用测速执行层，请先停止手机控制");
+  if (state.codexProbePreparing) throw new Error("测速正在准备，请勿重复启动");
+  state.codexProbePreparing = true;
+  try {
+    if (!selectedCorePath() || !await access(selectedCorePath())) throw new Error("请选择可用的 sing-box；测速会使用独立核心，不要求启动日常代理");
+    StreamQuality.endpoint(state.settings.streamQualityEndpoint || STREAM_QUALITY_ENDPOINT);
+    if (!state.mergedSourceConfig) await refreshSubscriptionNodeCatalog();
+    return true;
+  } finally { state.codexProbePreparing = false; }
 }
 
 function probePortForEntry(entry) {
@@ -3979,82 +3982,85 @@ async function runTokenMixModelProbe(item) {
   }
 }
 
-// Both models pull from one ordered queue. A node outcome is final; only an explicit
-// model/channel outage requeues that channel's unfinished item for the surviving model.
+// The legacy function name is internal compatibility only; no model/account inputs.
 async function runBatchTokProbe(items, options = {}) {
-  const usable = SmartProxyConfig.uniqueCodexProbeItems(items.filter(item => Number(item.port) > 0), item => Number(item.port));
-  const byPort = new Map();
-  if (!usable.length) return byPort;
-  const profile = $("probeProfile")?.value || state.settings.benchmarkProfile || "codex";
-  const scriptPath = await dualModelProbeScriptPath();
-  const nodePath = await resolveProbeNodeRuntime();
-  const command = [quote(nodePath), quote(scriptPath), "--ports", quote(usable.map(item => Number(item.port)).join(",")),
-    "--profile", profile === "tokenmix" ? "tokenmix" : "codex", "--concurrency", "4", "--timeout-seconds", "30",
-    "--tokenmix-key-file", quote(TOKENMIX_TOK_PROBE_KEY_FILE), "--codex-homes-root", quote(CODEX_TOK_PROBE_HOMES_ROOT),
-    "--codex-model", quote(state.settings.benchmarkCodexModel || CODEX_TOK_PROBE_MODEL), "--tokenmix-model", quote(TOKENMIX_TOK_PROBE_MODEL)].join(" ");
-  const payload = await new Promise(async (resolve, reject) => {
-    let buffer = "", stderr = "", result = null, settled = false, watchdog = null;
-    const early = [];
-    const job = { proc: null }; state.probeJob = job;
-    const finish = async error => {
-      if (settled) return; settled = true; clearTimeout(watchdog);
-      await Neutralino.events.off("spawnedProcess", onEvent).catch(err => log(`Probe listener cleanup failed: ${err.message || err}`));
-      if (state.probeJob === job) state.probeJob = null;
-      if (error) reject(error); else resolve(result);
-    };
-    const consume = line => {
-      let event; try { event = JSON.parse(line); } catch { if (line.trim()) log("Probe ignored non-JSON output"); return; }
-      if (event.type === "log") log(`Benchmark: ${String(event.message || "").slice(0, 500)}`);
-      if (event.type === "start") { state.lastProbeRoundId = event.roundId || ""; log(`Fixed benchmark ${event.modelId}/${event.model}; global concurrency <=4, preliminary scan + three-sample finalists`); }
+  const usable = SmartProxyConfig.uniqueCodexProbeItems(items.filter(item => item.entry?.key), item => item.entry.key);
+  const byKey = new Map();
+  if (!usable.length) return byKey;
+  const scriptPath = await dualModelProbeScriptPath(), nodePath = await resolveProbeNodeRuntime();
+  const endpoint = StreamQuality.endpoint(state.settings.streamQualityEndpoint || STREAM_QUALITY_ENDPOINT);
+  const rounds = state.settings.streamQualityRounds === 3 ? 3 : 1;
+  const config = SmartProxyConfig.buildSingBoxConfig(cloneConfig(state.mergedSourceConfig || state.sourceConfig), {
+    groupName: "SQ-ISOLATED", nodeNames: usable.map(item => item.entry.tag || item.entry.node),
+    forcedDomains: [], customRules: [], customOnlyRoutes: true, port: 1080, controllerPort: 9090,
+    secret: "unused-isolated-controller", probeLanes: null, logLevel: "error"
+  });
+  const payload = await SmartProxyStreamQuality.execute({ ns: Neutralino, workDir: state.paths.work, nodePath, scriptPath,
+    job: { endpoint, rounds, corePath: selectedCorePath(), config,
+      nodes: usable.map(item => ({ key: item.entry.key, tag: item.entry.tag || item.entry.node })) } }, {
+    log, onJob: job => { state.probeJob = job; }, isCancelled: () => state.codexProbeCancelRequested,
+    onEvent: event => {
+      if (event.type === "log") log(`Stream Quality: ${String(event.message || "").slice(0, 500)}`);
+      if (event.type === "start") {
+        state.lastProbeRoundId = event.roundId || "";
+        log(`Stream Quality ${event.profile}; serial ${rounds} round(s), max ${(event.maxDownloadBytes / 1048576).toFixed(0)} MiB download; isolated core`);
+      }
       if (event.type === "progress" && !state.codexProbeCancelRequested) {
         state.codexProbeCompleted = Number(event.completed || 0); state.codexProbeTotal = Number(event.total || usable.length);
         if (typeof options.onProgress === "function") options.onProgress(event);
         renderProxyNodes();
       }
-      if (event.type === "result") result = event;
-    };
-    const handle = detail => {
-      const action = String(detail.action || detail.event || "");
-      if (action === "stdOut") {
-        buffer += String(detail.data || "");
-        if (buffer.length > 2 * 1024 * 1024) { finish(new Error("Probe output exceeded 2 MiB bound")); return; }
-        let index; while ((index = buffer.indexOf("\n")) >= 0) { consume(buffer.slice(0, index)); buffer = buffer.slice(index + 1); }
-      } else if (action === "stdErr") stderr = (stderr + String(detail.data || "")).slice(-2000);
-      else if (action === "exit") {
-        if (buffer.trim()) consume(buffer);
-        if (!result || result.ok !== true) finish(new Error(result?.error || stderr || `Probe helper exited ${detail.data} without a result`));
-        else finish();
-      }
-    };
-    const onEvent = event => {
-      const detail = event?.detail || {};
-      if (!job.proc) { if (early.length < 64) early.push(detail); return; }
-      if (detail.id === job.proc.id) handle(detail);
-    };
-    try {
-      await Neutralino.events.on("spawnedProcess", onEvent);
-      job.proc = await Neutralino.os.spawnProcess(command, { cwd: state.paths.work });
-      early.filter(detail => detail.id === job.proc.id).forEach(handle);
-      if (state.codexProbeCancelRequested) await requestCodexProbeCancel();
-      // A supervisor bound is not inherited by queued requests. Each curl has its own 30s timeout.
-      if (settled) return;
-      watchdog = setTimeout(async () => {
-        log("Probe supervisor deadline exceeded; cancelling helper without changing node health");
-        await Neutralino.os.updateSpawnedProcess(job.proc.id, "stdIn", '{"action":"cancel"}\n').catch(err => log(`Probe supervisor cancel failed: ${err.message || err}`));
-        setTimeout(() => { if (!settled) { Neutralino.os.updateSpawnedProcess(job.proc.id, "exit").catch(err => log(`Probe helper termination failed: ${err.message || err}`)); finish(new Error("Probe supervisor timeout")); } }, 3000);
-      }, Math.max(120000, (usable.length * 2 + 12) * 32000));
-    } catch (err) { finish(err); }
+    }
   });
-  state.modelProbeNotice = payload.channelFailure ? `模型测速不可用：${payload.channelFailure.error}；不代表节点不可达。` : "";
-  byPort.roundInfo = payload;
-  if (payload.cancelled || payload.channelFailure) state.lastProbeRoundId = "";
-  for (const record of payload.outcomes || []) byPort.set(Number(record.port), record.value);
-  for (const item of usable) if (!byPort.has(Number(item.port))) byPort.set(Number(item.port), { ok: false, failureScope: "round", error: "本轮未返回节点结果" });
-  log(`Benchmark completed ${byPort.size} nodes in ${payload.elapsedMs}ms; peak ${payload.activity?.maxActiveTotal || 0}; no node switching`);
-  return byPort;
+  state.modelProbeNotice = "";
+  byKey.roundInfo = payload;
+  if (payload.cancelled) state.lastProbeRoundId = "";
+  for (const record of payload.outcomes || []) byKey.set(record.key, record.value);
+  for (const item of usable) if (!byKey.has(item.entry.key)) byKey.set(item.entry.key, { ok: false, failureScope: "round", error: "本轮未返回节点结果" });
+  log(`Stream Quality completed ${byKey.size} nodes in ${payload.elapsedMs}ms; daily core and selection untouched`);
+  return byKey;
 }
 
-// 单节点完整测速：gate 可达性 + tok/s（供手动单测与批量阶段共用的结果组装）
+async function togglePhoneQualityController() {
+  if (state.phoneProbeController) { await state.phoneProbeController.stop(); return; }
+  if (state.phoneProbeStarting || state.codexProbeRunning || state.codexProbePreparing || state.networkProbeJob) throw new Error("请先停止现有测速或等待准备完成");
+  await ensureCodexProbeReady();
+  state.phoneProbeStarting = true;
+  try {
+    const entries = state.subscriptionNodeCatalog;
+    if (!entries.length) throw new Error("没有缓存订阅节点");
+    const runnerPath = await dualModelProbeScriptPath();
+    const resourceDir = runnerPath.replace(/[\\/][^\\/]+$/, "");
+    await ensureDirectory(await Neutralino.filesystem.getJoinedPath(resourceDir, "web"));
+    for (const file of ["web/index.html", "web/app.js", "web/controller.js", "web/style.css"]) await bundledProbeScriptPath(file, "Stream Quality phone UI");
+    const scriptPath = await bundledProbeScriptPath("controller.cjs", "Stream Quality private controller");
+    const config = SmartProxyConfig.buildSingBoxConfig(cloneConfig(state.mergedSourceConfig || state.sourceConfig), {
+      groupName: "SQ-ISOLATED", nodeNames: entries.map(e => e.tag || e.node), forcedDomains: [], customRules: [], customOnlyRoutes: true, probeLanes: null, logLevel: "error"
+    });
+    const owner = await SmartProxyStreamQuality.serve({ ns: Neutralino, workDir: state.paths.work, scriptPath, nodePath: await resolveProbeNodeRuntime(),
+      job: { endpoint: state.settings.streamQualityEndpoint || STREAM_QUALITY_ENDPOINT, corePath: selectedCorePath(), config,
+        nodes: entries.map(e => ({ key: e.key, tag: e.tag || e.node, label: e.node,
+          subscriptions: e.subscriptionNames || [e.subscriptionName] })), history: Object.fromEntries(state.nodeCodexResults) } }, {
+      log, onClose: () => { state.phoneProbeController = null; $("phonePairCode").value = ""; $("phonePairing").hidden = true; $("phoneQualityBtn").textContent = "启动手机控制"; log("Phone controller stopped; daily core untouched"); },
+      onEvent: event => {
+        if (event.type === "log") log(`Phone Stream Quality: ${String(event.message || "").slice(0, 500)}`);
+        if (event.type === "start") state.lastProbeRoundId = event.roundId || "";
+        if (event.type === "result") {
+          if (event.cancelled) state.lastProbeRoundId = "";
+          for (const record of event.outcomes || []) { const entry = catalogEntryByKey(record.key); if (entry) storeCodexProbeResult(entry, buildTokResult(entry, null, record.value)); }
+          renderProxyNodes();
+        }
+      }
+    });
+    state.phoneProbeController = owner;
+    $("phonePairCode").value = owner.token;
+    $("phoneLocalUrl").value = `http://127.0.0.1:${owner.port}`;
+    $("phonePairing").hidden = false; $("phoneQualityBtn").textContent = "停止手机控制";
+    log(`Phone controller ready on loopback ${owner.port}; private HTTPS access must be configured separately. Local measurements paused; no daily routing changes.`);
+  } finally { state.phoneProbeStarting = false; }
+}
+
+// Shared result envelope; Stream Quality has no model tokens or account gate.
 function buildTokResult(entry, gate, tok) {
   const base = { node: entry.tag || entry.node, anthropicOk: gate?.gateSkipped || !gate ? null : gate.ok,
     gateRounds: gate?.roundCount || 0, gateSkipped: !gate || gate.gateSkipped === true,
@@ -4062,19 +4068,15 @@ function buildTokResult(entry, gate, tok) {
   if (!tok?.ok) return { ...base, status: tok?.failureScope === "cancelled" ? "cancelled" : "error",
     failureScope: tok?.failureScope || "round", error: tok?.error || "未获得完整测速结果", roundId: tok?.roundId || "" };
   return { ...base, ...tok, status: "ok", successCount: 1, probeReachable: true,
-    tokTtftMs: tok.ttftMs, tokTtftMedianMs: tok.ttftMedianMs || tok.ttftMs,
-    tokStreamMs: tok.deliveryStreamMs ?? tok.streamMs, tokElapsedMs: tok.elapsedMs ?? tok.streamMs,
-    tokDeltaCount: tok.deltaCount, tokStreamBuffered: tok.streamBuffered === true, serverConfirmed: true };
+    routeVerification: "isolated-node-lane", serverConfirmed: true };
 }
 
 async function runCodexNetworkProbeAttempt(entry, laneIndex = 0, uploadBytes = 0, probeOptions = {}) {
   const startedAt = Date.now();
   try {
-    const proxyPort = probeOptions.proxyPort || probePortForEntry(entry);
-    if (!proxyPort) return { status: "error", successCount: 0, node: entry.tag || entry.node, error: "本轮跳过：节点尚无静态探测通道（下次手动启动代理时生效）" };
     if (state.codexProbeCancelRequested) return { status: "cancelled", failureScope: "cancelled", node: entry.tag || entry.node };
-    const tokMap = await runBatchTokProbe([{ port: proxyPort }]);
-    return buildTokResult(entry, null, tokMap.get(proxyPort) || { ok: false, failureScope: "round", error: "无测速结果" });
+    const tokMap = await runBatchTokProbe([{ entry }]);
+    return buildTokResult(entry, null, tokMap.get(entry.key) || { ok: false, failureScope: "round", error: "无测速结果" });
   }
   catch (err) {
     return {
@@ -4089,7 +4091,7 @@ async function runCodexNetworkProbeAttempt(entry, laneIndex = 0, uploadBytes = 0
 }
 
 async function runCodexNetworkProbe(entry, laneIndex = 0, uploadBytes = PROBE_FINAL_UPLOAD_BYTES, probeOptions = {}) {
-  const maxAttempts = state.codexProbeMode === "single" ? CODEX_SINGLE_PROBE_MAX_ATTEMPTS : 1;
+  const maxAttempts = 1; // repetitions are explicit and interleaved by Stream Quality
   return SmartProxyConfig.runCodexProbeWithRetry(
     () => runCodexNetworkProbeAttempt(entry, laneIndex, uploadBytes, probeOptions),
     {
@@ -4144,7 +4146,7 @@ function storeCodexProbeResult(entry, result) {
   state.nodeCodexResults.set(entry.key, merged);
   state.codexProbePendingKeys.delete(entry.key);
   state.codexProbeLastKey = entry.key;
-  const store = state.settings.codexProbeStore || (state.settings.codexProbeStore = { version: 1, updatedAt: 0, results: {} });
+  const store = state.settings.streamQualityStore || (state.settings.streamQualityStore = { version: 1, updatedAt: 0, results: {} });
   store.results ||= {};
   store.results[entry.key] = SmartProxyConfig.normalizeCodexProbeResult(merged);
   store.updatedAt = Date.now();
@@ -4179,7 +4181,7 @@ async function testCodexNode(key) {
     const result = await runCodexNetworkProbe(entry);
     state.codexProbeCompleted = 1;
     const stored = storeCodexProbeResult(entry, result);
-    const metric = stored.status === "done" && Number(stored.tokPerSec) > 0 ? " " + Number(stored.tokPerSec).toFixed(1) + " tok/s" : "";
+    const metric = stored.status === "done" && stored.download ? ` ${stored.stream.flowPass ? "流式达标" : "有波动"} / ${stored.download.mbps.toFixed(1)} Mbps` : "";
     const detail = result.error ? " - " + result.error : "";
     log("Codex network probe " + result.status + ": " + entry.subscriptionName + "/" + entry.node + metric + detail);
     return stored;
@@ -4214,24 +4216,20 @@ async function testAllCodexNodes(options = {}) {
   const scoped = Array.isArray(options.entries) && options.entries.length ? options.entries : null;
   let entries = SmartProxyConfig.uniqueCodexProbeItems(scoped || state.subscriptionNodeCatalog, entry => entry.key);
   if (!entries.length) throw new Error("没有可测试的节点");
-  const liveGroup = await api(mainController(), MAIN_SECRET, "/proxies/" + encodeURIComponent(state.settings.targetGroup || DEFAULT_SETTINGS.targetGroup));
-  if (!Array.isArray(liveGroup?.all)) throw new Error("本机控制器未返回有效节点组；不修改节点成绩");
-  const liveTags = new Set(liveGroup.all.map(String));
-  const testable = entries.filter(entry => liveTags.has(String(entry.tag || entry.node)) && probePortForEntry(entry) > 0);
-  if (testable.length !== entries.length) log(`Benchmark skipped ${entries.length - testable.length} nodes without active lanes; not marked unreachable`);
-  entries = SmartProxyConfig.rankCodexProbeEntries(testable, state.nodeCodexResults);
+  entries = SmartProxyConfig.rankCodexProbeEntries(entries, state.nodeCodexResults);
+  // All cached subscription nodes get independent ephemeral lanes, including inactive nodes.
   const limit = Math.max(0, Math.trunc(Number(options.limit || 0)));
   if (limit) entries = entries.slice(0, limit);
-  if (!entries.length) throw new Error("没有当前内核可测的节点；配置将在下次手动启动代理时生效");
+  if (!entries.length) throw new Error("没有缓存节点可测；请先导入订阅或离线 YAML");
   state.codexProbeRunning = true;
   state.codexProbeMode = options.continuous ? "continuous" : scoped ? "group" : "all";
   state.codexProbeCancelRequested = false; state.codexProbeCompleted = 0; state.codexProbeTotal = entries.length;
   entries.forEach(markCodexProbePending); renderProxyNodes();
-  const byPort = new Map(entries.map(entry => [probePortForEntry(entry), entry]));
+  const byKey = new Map(entries.map(entry => [entry.key, entry]));
   try {
-    const tokMap = await runBatchTokProbe(entries.map(entry => ({ port: probePortForEntry(entry) })), {
+    const tokMap = await runBatchTokProbe(entries.map(entry => ({ entry })), {
       onProgress: event => {
-        const entry = byPort.get(Number(event.port));
+        const entry = byKey.get(event.key);
         if (!entry) return;
         state.codexProbeBusyKey = entry.key;
         // Show progress without prematurely replacing durable results. The final
@@ -4242,7 +4240,7 @@ async function testAllCodexNodes(options = {}) {
     let failed = 0;
     for (const entry of entries) {
       const value = state.codexProbeCancelRequested ? { ok: false, failureScope: "cancelled", error: "测速已停止" }
-        : tokMap.get(probePortForEntry(entry));
+        : tokMap.get(entry.key);
       const result = buildTokResult(entry, null, value);
       roundResults.set(entry.key, result);
       const stored = storeCodexProbeResult(entry, result);
@@ -4292,17 +4290,10 @@ function stopContinuousCompetition(reason = "disabled") {
 
 async function applyContinuousRecord(entry, result) {
   if (!state.continuousProbeDesired || !result || result.status !== "done") return false;
-  const tokPerSec = Number(result.tokPerSec || 0);
-  if (!Number.isFinite(tokPerSec)) return false;
-  // 失败结果只保留历史展示，不能成为本轮纪录。
-  if (result.anthropicOk !== true) {
-    if (result.anthropicOk === false) log(`Continuous probe skips blocked node: ${entry.subscriptionName}/${entry.node}`);
-    return false;
-  }
-  if (!state.continuousProbeDesired || tokPerSec <= state.continuousProbeBestMbps + 0.001) return false;
-  state.continuousProbeBestMbps = tokPerSec;
-  state.continuousProbeBestKey = entry.key;
-  log(`Continuous probe new record ${tokPerSec.toFixed(2)} tok/s (manual selection only): ${entry.subscriptionName}/${entry.node}`);
+  if (result.metricKind !== "stream-quality-v1" || !result.verified || !result.stream?.flowPass || result.lastAttempt?.status !== "done") return false;
+  // Passing fixed flows tie; bandwidth records do not become automatic selections.
+  state.continuousProbeBestKey ||= entry.key;
+  log(`Continuous Stream Quality pass (manual selection only): ${entry.subscriptionName}/${entry.node}`);
   return true;
 }
 
@@ -5003,7 +4994,7 @@ function showNetworkError(error) {
 
 async function testNetworkNodes(filter = {}) {
   if (state.networkProbeJob) { state.networkProbeJob.abort(); state.networkProgress = "正在停止…"; renderNetworkProbeState(state.subscriptionNodeCatalog); renderProxyNodes(); return; }
-  if (state.codexProbeRunning) throw new Error("模型测速正在运行，请先停止它");
+  if (state.codexProbeRunning || state.codexProbePreparing || state.phoneProbeController || state.phoneProbeStarting) throw new Error("流式测速或手机控制正在运行，请先停止它");
   const controller = new AbortController();
   state.networkProbeJob = controller;
   state.networkProgress = "正在读取运行中节点…";
@@ -5133,7 +5124,7 @@ function renderProxyNodes() {
       const sorted = SmartProxyConfig.rankCodexProbeEntries(group.entries, state.nodeCodexResults);
       const reachable = group.entries.filter((entry) => {
         const result = resultOf(entry);
-        return result && result.status === "done" && Number(result.tokPerSec) > 0 && (!result.lastAttempt || result.lastAttempt.status === "done");
+        return result?.metricKind === "stream-quality-v1" && result.status === "done" && (!result.lastAttempt || result.lastAttempt.status === "done");
       }).length;
       const blocked = group.entries.filter((entry) => {
         const result = resultOf(entry);
@@ -5143,8 +5134,8 @@ function renderProxyNodes() {
         && group.entries.some((entry) => entry.key === state.codexProbeBusyKey || state.codexProbePendingKeys.has(entry.key));
       const statText = [`${group.entries.length} 节点`]
         .concat([`网络可达 ${group.entries.filter(e => state.settings.networkProbeStore?.[e.key]?.status === "done").length}`])
-        .concat(reachable ? [`模型成绩 ${reachable}`] : [])
-        .concat(blocked ? [`模型未通过 ${blocked}`] : [])
+        .concat(reachable ? [`质量成绩 ${reachable}`] : [])
+        .concat(blocked ? [`本次未通过 ${blocked}`] : [])
         .join(" · ");
       const collapsed = !query && filter === "all" && state.nodeGroupCollapsed.has(group.id);
       const rows = collapsed ? "" : sorted.map((entry) => {
@@ -5153,42 +5144,9 @@ function renderProxyNodes() {
         const current = (entry.tag || entry.node) === state.currentNode;
         const prepared = state.pendingNodeSelection && state.pendingNodeSelection.key === entry.key;
         const fastest = entry.key === globalBestKey;
-        let dot = "idle";
-        let metric = "—";
-        let metricClass = "muted";
-        const pending = state.codexProbePendingKeys.has(entry.key);
-        if (pending) {
-          dot = "busy";
-          const previousTok = Number(result && result.tokPerSec || 0);
-          metric = previousTok > 0 ? previousTok.toFixed(1) + " tok/s · 测速中" : "测速中";
-          metricClass = "busy";
-        }
-        else if (result) {
-          if (result.status === "pending") { dot = "busy"; metric = "测速中"; metricClass = "busy"; }
-          else if (result.lastAttempt && result.lastAttempt.status !== "done") {
-            dot = "idle";
-            const history = Number(result.tokPerSec || 0);
-            metric = (history > 0 ? `${history.toFixed(1)} tok/s 历史 · ` : "") + (result.lastAttempt.status === "cancelled" ? "已停止" : "本次未通过");
-            metricClass = "muted";
-          }
-          else if (result.status === "done" && Number(result.tokPerSec) > 0) {
-            dot = "ok";
-            const delay = Number(result.delayMs || result.anthropicMs || 0);
-            const tok = Number(result.tokPerSec || 0);
-            if (tok > 0) {
-              metric = tok.toFixed(1) + " tok/s · " + (result.verified ? `${result.successfulSamples}/${result.sampleCount} 次` : result.sampleCount > 1 ? `${result.successfulSamples}/${result.sampleCount} 不稳定` : result.sampleCount ? "初筛" : "旧口径");
-              metricClass = tok >= 40 ? "fast" : tok >= 25 ? "medium" : "slow";
-            }
-            else if (delay > 0) {
-              metric = delay + " ms";
-              metricClass = delay <= DELAY_FAST_MS ? "fast" : delay <= DELAY_MEDIUM_MS ? "medium" : "slow";
-            }
-            else { metric = "可达"; metricClass = "medium"; }
-          }
-          else if (result.status === "error") { dot = "bad"; metric = "失败"; metricClass = "bad"; }
-          else { metric = "已停止"; }
-        }
         const codex = nodeCodexPresentation(result, entry.key);
+        const metric = codex.text, metricClass = codex.className;
+        const dot = metricClass === "busy" ? "busy" : metricClass === "fast" ? "ok" : "idle";
         const network = networkMetric(entry);
         const tag = current ? "当前" : prepared ? "已准备" : fastest ? "本轮候选" : "";
         return `
@@ -5198,10 +5156,10 @@ function renderProxyNodes() {
             <span class="node-ico">${escapeHtml(meta.icon)}</span>
             <span class="node-label">${escapeHtml(meta.shortName)}</span>
             <span class="network-metric ${network.css}" title="${escapeHtml(network.title)}">${escapeHtml(network.text)}</span>
-            <span class="node-metric ${metricClass}" title="模型测速：${escapeHtml(codex.title)}">${escapeHtml(metric)}</span>
+            <span class="node-metric ${metricClass}" title="流式质量 / 下载：${escapeHtml(codex.title)}">${escapeHtml(metric)}</span>
             <span class="node-tag ${fastest && !current ? "gold" : ""}">${escapeHtml(tag)}</span>
             <button class="node-network" data-network-probe-key="${escapeHtml(entry.key)}" title="测试网络连通性与延迟" ${state.codexProbeRunning || state.networkProbeJob ? "disabled" : ""}>网络</button>
-            <button class="node-retest" data-codex-probe-key="${escapeHtml(entry.key)}" title="模型测速（消耗账户额度）" ${state.networkProbeJob || state.codexProbeRunning && state.codexProbeBusyKey !== entry.key ? "disabled" : ""}>模型</button>
+            <button class="node-retest" data-codex-probe-key="${escapeHtml(entry.key)}" title="固定流式 + 8 MiB 下载，不调用模型" ${state.networkProbeJob || state.codexProbeRunning && state.codexProbeBusyKey !== entry.key ? "disabled" : ""}>质量</button>
           </div>`;
       }).join("");
       return `
@@ -5222,7 +5180,7 @@ function renderProxyNodes() {
   if ($("testAllCodexBtn")) {
     $("testAllCodexBtn").textContent = state.codexProbeRunning && state.codexProbeMode !== "single" && state.codexProbeMode !== "group"
       ? "停止全测"
-      : "模型全测";
+      : "质量全测";
   }
   renderNetworkProbeState(entries);
   const summaryBox = $("nodeScoreSummary");
@@ -5239,7 +5197,7 @@ function renderProxyNodes() {
   else {
     const reachableTotal = entries.filter((entry) => {
       const result = resultOf(entry);
-      return result && result.status === "done" && Number(result.tokPerSec) > 0 && (!result.lastAttempt || result.lastAttempt.status === "done");
+      return result?.metricKind === "stream-quality-v1" && result.status === "done" && (!result.lastAttempt || result.lastAttempt.status === "done");
     }).length;
     const blockedTotal = entries.filter((entry) => {
       const result = resultOf(entry);
@@ -5249,9 +5207,9 @@ function renderProxyNodes() {
     const guardText = guard && !guard.skipped && guard.ok !== null ? ` · 守护${guard.ok ? "正常" : "告警"} ${Math.max(0, Math.round((Date.now() - guard.at) / 1000))}s 前` : "";
     const globalBestResult = globalBestEntry ? resultOf(globalBestEntry) : null;
     const bestText = globalBestEntry && globalBestResult
-      ? ` · 本轮复测候选 ${globalBestEntry.subscriptionName}/${globalBestEntry.node} ${Number(globalBestResult.tokPerSec).toFixed(1)} tok/s`
+      ? ` · 本轮流式复测达标（并列） ${globalBestEntry.subscriptionName}/${globalBestEntry.node}`
       : "";
-    summaryBox.textContent = `${state.modelProbeNotice}${entries.length} 节点 · 有成绩 ${reachableTotal} · 本次未通过 ${blockedTotal}${bestText}${guardText} · 测速不切节点`;
+    summaryBox.textContent = `${state.modelProbeNotice}${entries.length} 节点 · 有成绩 ${reachableTotal} · 本次未通过 ${blockedTotal}${bestText}${guardText} · 全测流量上限约 ${(entries.length * (state.settings.streamQualityRounds === 3 ? 3 : 1) * 8.1).toFixed(0)} MiB · 独立核心，不切日常节点`;
   }
 }
 
@@ -5467,10 +5425,10 @@ async function bindEvents() {
   });
   $("pickConfigBtn").addEventListener("click", pickConfig);
   $("removeOfflineYamlBtn")?.addEventListener("click", () => removeOfflineYamlSource().catch(err => log(`Remove offline YAML failed: ${err.message || err}`)));
-  $("probeProfile")?.addEventListener("change", () => {
-    state.settings.benchmarkProfile = $("probeProfile").value === "tokenmix" ? "tokenmix" : "codex";
-    scheduleSettingsPersist("benchmark profile");
-    log(`Benchmark profile selected: ${state.settings.benchmarkProfile}; next round uses one fixed channel`);
+  $("streamQualityRounds")?.addEventListener("change", () => {
+    state.settings.streamQualityRounds = $("streamQualityRounds").value === "3" ? 3 : 1;
+    scheduleSettingsPersist("stream quality rounds");
+    renderProxyNodes();
   });
   $("refreshSubBtn").addEventListener("click", () => refreshSubscription().catch((err) => log(`Refresh subscription failed: ${err.message || err}`)));
   $("pickCoreBtn").addEventListener("click", pickCore);
@@ -5502,11 +5460,10 @@ async function bindEvents() {
   $("checkCoreBtn").addEventListener("click", () => checkCoreVersions().catch((err) => log(`Check core versions failed: ${err.message || err}`)));
   $("downloadSingBoxBtn").addEventListener("click", () => downloadCoreLatest()
     .catch((err) => log(`Download sing-box failed: ${err.message || err}`)));
-  $("benchmarkCodexModel")?.addEventListener("change", () => {
-    const model = $("benchmarkCodexModel").value.trim();
-    if (!/^[a-zA-Z0-9._-]{1,100}$/.test(model)) { $("benchmarkCodexModel").value = state.settings.benchmarkCodexModel || CODEX_TOK_PROBE_MODEL; return; }
-    state.settings.benchmarkCodexModel = model;
-    scheduleSettingsPersist("benchmark model");
+  $("streamQualityEndpoint")?.addEventListener("change", () => {
+    try { state.settings.streamQualityEndpoint = StreamQuality.endpoint($("streamQualityEndpoint").value.trim()); }
+    catch (error) { log(`Invalid Stream Quality endpoint: ${error.message}`); $("streamQualityEndpoint").value = state.settings.streamQualityEndpoint || STREAM_QUALITY_ENDPOINT; return; }
+    scheduleSettingsPersist("stream quality endpoint");
   });
   $("testNetworkBtn")?.addEventListener("click", () => testNetworkNodes().catch(showNetworkError));
   $("nodeSearch")?.addEventListener("input", renderProxyNodes);
@@ -5578,6 +5535,8 @@ async function bindEvents() {
       .then(renderProxyNodes)
       .catch((err) => log(`Manual select failed: ${err.message || err}`));
   });
+  $("phoneQualityBtn").addEventListener("click", () => togglePhoneQualityController().catch(err => log(`Phone controller: ${err.message || err}`)));
+  $("copyPhonePairCode").addEventListener("click", () => Neutralino.clipboard.writeText($("phonePairCode").value).catch(err => log(`Pairing code copy failed: ${err.message || err}`)));
   $("testAllCodexBtn").addEventListener("click", () => testAllCodexNodes()
     .catch((err) => {
       log(`Codex bulk probe failed: ${err.message || err}`);
@@ -5725,6 +5684,7 @@ async function reloadAppSurface(reason = "user", options = {}) {
       state.nodeGuardTimer = null;
     }
     await requestCodexProbeCancel();
+    await state.phoneProbeController?.stop();
     await saveSettingsNow().catch(err => log(`Save before surface reload failed: ${err.message || err}`));
     await flushLogBuffer().catch(err => console.error("Log flush before reload failed", err));
     await sleep(120);
@@ -5838,6 +5798,7 @@ async function runExitSequence() {
 async function closeAppFast() {
   if (state.exitPromise) return await state.exitPromise;
   state.closing = true;
+  await state.phoneProbeController?.stop().catch(err => log(`Phone controller stop failed: ${err.message || err}`));
   state.exitPromise = runExitSequence();
   return await state.exitPromise;
 }
@@ -5917,7 +5878,8 @@ async function boot() {
   state.pendingWindowShowReason = "";
   if (verifyWindowReady) {
     const surfaceReady = document.readyState !== "loading" && !!document.querySelector(".app")
-      && !!document.getElementById("removeOfflineYamlBtn") && document.getElementById("probeProfile")?.options.length === 2
+      && !!document.getElementById("removeOfflineYamlBtn") && document.getElementById("streamQualityRounds")?.options.length === 2
+      && typeof SmartProxyStreamQuality !== "undefined" && typeof StreamQuality !== "undefined"
       && !!document.getElementById("siteFailoverTargets") && !!document.getElementById("siteFailoverEnabled")
       && typeof SmartProxySiteFailover !== "undefined" && typeof SmartProxySiteFailover.createGuard === "function"
       && typeof SmartProxyNetwork !== "undefined" && typeof SmartProxyNetwork.runRound === "function"

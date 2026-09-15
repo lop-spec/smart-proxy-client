@@ -1,0 +1,16 @@
+{
+  "repository": "https://github.com/lop-spec/stream-quality",
+  "commit": "6cabc82204d41d485b97f7cec5b4c822f8c4bc1c",
+  "license": "MIT",
+  "licenseSource": "LICENSE",
+  "sha256": {
+    "STREAM-QUALITY-LICENSE": "30b3dbb3f451a4d8aa6af6a6fa17d8103d1e658e156e4d9e587390858b5b875c",
+    "stream-quality.js": "45172f566c38eb9e97b97d79ecc0c87417aae6e298adbbe5f89fef9cab113201",
+    "stream-quality-runner.cjs": "5d7459c33be417806d92072108177c207268dcb3d52738f64f9d714b9c4f25ff",
+    "controller.cjs": "78ef0e94eea405ea840afc0856cf1d649f763b71f13eaed8c7805effc0098f4f",
+    "web/app.js": "01a695308d1ef61980f991afcc79c4469e3380f62b161480e0c7b027bcfe78e4",
+    "web/controller.js": "98d36134288c206e78507cb1a780afc696065b20f89e8adbe94e9580ecbb78bd",
+    "web/index.html": "6f92496ae1af97a6e7d723a9c2e7ffec534850e42a41c1ca6893a1f6966139b3",
+    "web/style.css": "ed9748079f1695f1215148f8bd5edbe34311938a39583eb2a5fb31d4d8dba1e1"
+  }
+}

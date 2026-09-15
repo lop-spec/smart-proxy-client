@@ -296,9 +296,9 @@ assert.doesNotMatch(
   /killProcess\(|killCorePorts\(|startMainCore\(|switchToNode\(/,
   "saving configuration must leave the running core and selected node untouched"
 );
-assert.match(mainScript, /dual-model-probe\.js/, "the UI must launch one out-of-process batch helper per round");
-assert.match(mainScript, /benchmarkCodexModel/, "the Codex model is explicit and configurable, never silently swapped mid-round");
-assert.match(mainScript, /gpt-4o-mini/, "the TokenMix model must be restored as the second pool member");
+assert.match(mainScript, /stream-quality-runner\.cjs/, "the UI launches the independent non-model runner");
+assert.match(mainScript, /streamQualityEndpoint/, "the fixed endpoint is explicit and configurable");
+assert.match(mainScript, /streamQualityStore/, "new results do not overwrite the model history store");
 assert.doesNotMatch(
   mainScript,
   /TOK_BATCH_SIZE/,
@@ -323,9 +323,10 @@ assert.match(mainScript, /elapsedMs:\s*benchmarkElapsedMs/, "the UI result must 
 
 const batchFunctionSource = mainScript.slice(
   mainScript.indexOf("async function runBatchTokProbe("),
-  mainScript.indexOf("// 单节点完整测速")
+  mainScript.indexOf("// Shared result envelope")
 );
-assert.match(batchFunctionSource, /Neutralino\.os\.spawnProcess\(/, "the round must launch one controllable helper process");
+assert.match(batchFunctionSource, /SmartProxyStreamQuality\.execute\(/, "the round delegates to the tested controllable lifecycle adapter");
+assert.doesNotMatch(batchFunctionSource, /TOKENMIX_TOK_PROBE_KEY_FILE|CODEX_TOK_PROBE_HOMES_ROOT|benchmarkCodexModel/, "active benchmarking cannot read model/account inputs");
 assert.match(batchFunctionSource, /dualModelProbeScriptPath\(/, "the one process launch must be the batch helper");
 assert.doesNotMatch(
   batchFunctionSource,
@@ -367,7 +368,7 @@ assert.match(batchScript, /effectiveTokPerSec\(parsed.tokens, elapsedMs\)/, "bot
 assert.match(batchScript, /streamBuffered:/, "buffering evidence survives");
 assert.match(batchScript, /timingSource: TIMING_SOURCE/);
 assert.doesNotMatch(batchScript, /characters\s*\/\s*[46]/, "token counts must not be estimated from characters");
-assert.match(mainScript, /tok\.deliveryStreamMs \?\? tok\.streamMs/, "the next UI load must retain the separate delivery window");
+assert.match(mainScript, /const \{ stream, download \} = entry/, "new UI retains separate stream-quality and download fields");
 assert.equal(batchProbe.codexChannelFailure(401, "unauthorized"), true, "account authentication failure must disable only that route");
 assert.equal(batchProbe.codexChannelFailure(429, "rate limit"), true, "account quota failure must trigger takeover");
 assert.equal(batchProbe.codexChannelFailure(400, "generic exit response"), false, "a generic node HTTP response must not disable an account");
