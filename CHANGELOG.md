@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.0 - 2026-09-15
+
+- Separate account-free HTTPS node testing from optional model throughput testing. Preserve provider error detail; unsupported models and rejected requests no longer count as broken nodes. Expose the Codex model explicitly, defaulting to gpt-5.5.
+- Retry overdue subscription failures after the cooldown, not another 24 hours. Download missing caches, detect credential-only changes, and persist per-subscription staged/error status. Both manual and automatic refresh leave running routes untouched.
+- Replace the unbounded legacy core updater with an independent official-source updater: architecture-aware non-legacy assets, shared download deadline, size/SHA256/version/config checks, unique install paths and explicit success/error feedback. Slow official CDN downloads can use a disclosed byte mirror, verified against independent official metadata. PowerShell stderr warnings alone no longer turn successful core checks into failures.
+- Reorganize the entire workspace into overview, nodes, subscriptions, core, connections, logs and settings; add search, network filters, keyboard access, responsive layout and honest pending/unknown states.
+
 ## 1.2.2 - 2026-09-14
 
 - Replace the dead DNS-based subscription auto-recovery with evidence-based background refresh: a benchmark round where at least 25% of one subscription's nodes fail at the connection level, or a cache older than the provider's `Profile-Update-Interval` (default 24 h), downloads that subscription again in the background.

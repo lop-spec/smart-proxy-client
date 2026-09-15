@@ -3,7 +3,7 @@ const MAIN_CONTROLLER_TIMEOUT_MS = 8000;
 const MAIN_CORE_START_ATTEMPTS = 3;
 const MAIN_CORE_RETRY_DELAY_MS = 450;
 const APP_CONFIG_VERSION = 17;
-const APP_BUILD_ID = "2026-09-14-evidence-subscription-refresh-v1.2.2";
+const APP_BUILD_ID = "2026-09-15-network-core-workspace-v1.3.0";
 const LOG_MAX_FILE_BYTES = 8 * 1024 * 1024;
 const LOG_MAX_BUFFER_BYTES = 256 * 1024;
 const LOG_FLUSH_MS = 500;
@@ -31,7 +31,7 @@ const ANTHROPIC_PROBE_HOST = "api.anthropic.com";
 // All routes pull different nodes from one shared queue; a route outage leaves the
 // survivors to drain it, while a node-specific failure is final and never re-tested.
 const CODEX_TOK_PROBE_HOST = "chatgpt.com";
-const CODEX_TOK_PROBE_MODEL = "gpt-5.3-codex-spark";
+const CODEX_TOK_PROBE_MODEL = "gpt-5.5";
 const CODEX_TOK_PROBE_TIMEOUT_S = 30;
 const CODEX_TOK_PROBE_HOMES_ROOT = "C:/Users/lop/Documents/claude/vscodium/homes";
 const CODEX_TOK_PROBE_SCRIPT = "codex-subscription-probe.ps1";
@@ -119,8 +119,8 @@ const ENDPOINT_AUTO_RECOVER_RATIO = 0.25;
 const ENDPOINT_AUTO_RECOVER_COOLDOWN_MS = 20 * 60 * 1000;
 // 订阅过期只认真实证据：测速里该订阅 ≥ RATIO 节点连接级失败，或缓存超过机场声明的
 // Profile-Update-Interval（默认 24h）。系统 DNS 诊断永远只是提示（见 refreshEndpointDnsHealth）。
-const SUBSCRIPTION_REFRESH_TICK_MS = 30 * 60 * 1000;
-const SUBSCRIPTION_REFRESH_FIRST_TICK_MS = 5 * 60 * 1000;
+const SUBSCRIPTION_REFRESH_TICK_MS = 60 * 1000;
+const SUBSCRIPTION_REFRESH_FIRST_TICK_MS = 15 * 1000;
 const SUBSCRIPTION_REFRESH_DEFAULT_HOURS = 24;
 const ENTRY_TCP_PROBE_TIMEOUT_MS = 5000;
 const ENTRY_TCP_PROBE_MAX = 3;
@@ -177,6 +177,9 @@ const DEFAULT_SETTINGS = {
   lastSelectedNodeTag: "",
   codexProbeStore: { version: 1, updatedAt: 0, results: {} },
   benchmarkProfile: "codex",
+  benchmarkCodexModel: CODEX_TOK_PROBE_MODEL,
+  networkProbeStore: {},
+  subscriptionRefreshStatus: {},
   // 节点分组规则：按顺序匹配，pattern 为空 = 兜底组（放最后）。
   // field: "subscription" 匹配「订阅id 订阅名」，"node" 匹配节点名。
   nodeGroupRules: [
@@ -200,7 +203,7 @@ const state = {
   logBuffer: [], logBufferBytes: 0, logDropped: 0, logFlushTimer: null, logFlushBusy: false,
   logFileBytes: null, logRenderTimer: null,
   connectionRefreshPromise: null, connectionPollGeneration: 0, lastConnectionsHtml: "", lastCurrentNodeCheckAt: 0,
-  probeJob: null, lastProbeRoundId: "",
+  probeJob: null, lastProbeRoundId: "", modelProbeNotice: "",
   connections: [],
   seenConnections: new Set(),
   coreProcessByConnId: new Map(),
@@ -227,6 +230,10 @@ const state = {
   lastConnectionRefreshByTarget: new Map(),
   currentNode: "-",
   coreCheckRunning: false,
+  coreUpdateRunning: false,
+  networkProbeJob: null,
+  networkPendingKeys: new Set(),
+  networkProgress: "",
   closing: false,
   exitPromise: null,
   lifecycleQueue: Promise.resolve(),
@@ -585,43 +592,19 @@ function setStatus() {
   $("heroTitle").textContent = on ? "代理运行中" : "代理未启动";
   $("heroMeta").textContent = on
     ? `${core} / ${routeMode} / 节点 ${allNodes.length}`
-    : `当前核心 ${core}${corePath ? " / 已设置路径" : " / 未设置路径"}`;
-  $("toggleCoreBtn").textContent = on ? "停止代理" : "启动代理";
-  if ($("homeCore")) $("homeCore").textContent = core;
-  if ($("coreBadge")) $("coreBadge").textContent = `${core}${corePath ? " / 路径已设置" : " / 路径未设置"}`;
-  $("homeGroup").textContent = state.settings.targetGroup || "-";
-  const visibleNodeCount = state.subscriptionNodeCatalog.length || state.nodes.length;
-  if ($("subscriptionStatus")) $("subscriptionStatus").textContent = visibleNodeCount
-    ? `已缓存 ${visibleNodeCount} 个节点`
-    : "未获取节点";
-  updateHomeProxyControls();
-  renderHomeTraffic();
-}
-
-setStatus = function () {
-  const on = !!state.mainProcess && !!state.mainCoreReady;
-  const core = currentCoreLabel();
-  const corePath = selectedCorePath();
-  const allNodes = state.nodes.length ? state.nodes : getCandidateNodes();
-  const routeMode = state.settings.globalProxyEnabled ? "全局代理" : "自定义规则";
-  $("sideDot").className = `dot ${on ? "on" : ""}`;
-  $("sideStatus").textContent = on ? "代理运行中" : "未启动";
-  $("hero").className = `hero ${on ? "on" : "off"}`;
-  $("heroTitle").textContent = on ? "代理运行中" : "代理未启动";
-  $("heroMeta").textContent = on
-    ? `${core} / ${routeMode} / 节点 ${allNodes.length}`
     : `当前核心 ${core}${corePath ? " / 路径已设置" : " / 路径未设置"}`;
   $("toggleCoreBtn").textContent = on ? "停止代理" : "启动代理";
   if ($("homeCore")) $("homeCore").textContent = core;
   if ($("coreBadge")) $("coreBadge").textContent = `${core}${corePath ? " / 路径已设置" : " / 路径未设置"}`;
   $("homeGroup").textContent = state.settings.targetGroup || "-";
   const visibleNodeCount = state.subscriptionNodeCatalog.length || state.nodes.length;
-  if ($("subscriptionStatus")) $("subscriptionStatus").textContent = visibleNodeCount
-    ? `已缓存 ${visibleNodeCount} 个节点`
-    : "未获取节点";
+  const refresh = state.settings.subscriptionRefreshStatus?.[state.settings.activeSubscriptionId];
+  if ($("subscriptionStatus")) $("subscriptionStatus").textContent = refresh?.error ? "更新失败，现有缓存保留"
+    : refresh?.pending ? "已下载，待下次手动启动生效"
+    : visibleNodeCount ? `已缓存 ${visibleNodeCount} 个节点` : "未获取节点";
   updateHomeProxyControls();
   renderHomeTraffic();
-};
+}
 
 function normalizeSubscriptionSettings() {
   const normalized = SmartProxyConfig.normalizeSubscriptions(state.settings);
@@ -637,11 +620,11 @@ function activeSubscription() {
 function subscriptionFormDraft() {
   const homeName = $("homeSubscriptionName") && $("homeSubscriptionName").value.trim();
   const settingsName = $("subscriptionName") && $("subscriptionName").value.trim();
-  const name = state.currentView === "home"
+  const name = ["home", "subscriptions"].includes(state.currentView)
     ? (homeName || settingsName)
     : (settingsName || homeName);
   const url = SmartProxyConfig.chooseSubscriptionUrl({
-    currentView: state.currentView,
+    currentView: state.currentView === "subscriptions" ? "home" : state.currentView,
     homeValue: $("homeSubscriptionUrl") && $("homeSubscriptionUrl").value,
     settingsValue: $("subscriptionUrl") && $("subscriptionUrl").value
   });
@@ -745,6 +728,8 @@ function writeSettingsToForm() {
   }
   renderSubscriptionControls();
   if ($("probeProfile")) $("probeProfile").value = state.settings.benchmarkProfile || "codex";
+  if ($("benchmarkCodexModel")) $("benchmarkCodexModel").value = state.settings.benchmarkCodexModel || CODEX_TOK_PROBE_MODEL;
+  renderSubscriptionRefreshStatus();
   if ($("removeOfflineYamlBtn")) $("removeOfflineYamlBtn").disabled = !state.settings.configPath;
   if ($("autoStartSilent")) $("autoStartSilent").checked = !!state.settings.autoStartSilent;
   if ($("continuousWssAutoSwitchEnabled")) {
@@ -1911,8 +1896,7 @@ async function refreshSubscriptionNodeCatalog(options = {}) {
 }
 
 async function loadMergedCachedSubscriptionPoolForStartup() {
-  // 启动代理时节点池按缓存重建：后台预备的新订阅到此才真正生效。
-  state.pendingConfigApply = null;
+  // Rebuilding a catalog isn't proof the new configuration has started.
   const catalog = await refreshSubscriptionNodeCatalog({ activeConfig: null });
   const sourceCount = state.subscriptionConfigs.size;
   if (
@@ -2104,27 +2088,22 @@ async function resolveSubscriptionConfigPath(options = {}) {
   });
 }
 
-function coreDownloadScript(kind, zipPath, extractPath, destinationPath, fallbackPath) {
-  return [
-    "$ErrorActionPreference='Stop'",
-    "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12",
-    "$headers=@{'User-Agent'='clash.meta/1.19.0'}",
-    "$release=Invoke-RestMethod -Headers $headers -Uri 'https://api.github.com/repos/SagerNet/sing-box/releases/latest'",
-    "$asset=$release.assets | Where-Object { $_.name -match 'windows-amd64.*\\.zip$' -and $_.name -match 'legacy-windows-7' } | Select-Object -First 1; if (-not $asset) { $asset=$release.assets | Where-Object { $_.name -match 'windows-amd64.*\\.zip$' -and $_.name -notmatch 'legacy|arm64|armv|\\.asc|sha256' } | Select-Object -First 1 }",
-    "if (-not $asset) { throw 'sing-box windows-amd64 zip asset not found' }",
-    `Invoke-WebRequest -Headers $headers -Uri $asset.browser_download_url -OutFile ${psQuote(zipPath)}`,
-    `if (Test-Path ${psQuote(extractPath)}) { Remove-Item -LiteralPath ${psQuote(extractPath)} -Recurse -Force }`,
-    `New-Item -ItemType Directory -Force -Path ${psQuote(extractPath)} | Out-Null`,
-    `Expand-Archive -Path ${psQuote(zipPath)} -DestinationPath ${psQuote(extractPath)} -Force`,
-    `$exe=Get-ChildItem -Path ${psQuote(extractPath)} -Recurse -Filter 'sing-box.exe' | Select-Object -First 1`,
-    "if (-not $exe) { throw 'sing-box exe not found in archive' }",
-    `$installedPath=${psQuote(destinationPath)}`,
-    `$fallbackPath=${psQuote(fallbackPath || "")}`,
-    "$usedFallback=$false",
-    "try { Copy-Item -LiteralPath $exe.FullName -Destination $installedPath -Force } catch { $copyError=$_.Exception.Message; if (-not $fallbackPath) { throw }; try { Copy-Item -LiteralPath $exe.FullName -Destination $fallbackPath -Force; $installedPath=$fallbackPath; $usedFallback=$true } catch { throw ('Copy to default failed: ' + $copyError + '; fallback also failed: ' + $_.Exception.Message) } }",
-    "$version=& $installedPath version 2>$null | Select-Object -First 1",
-    "[pscustomobject]@{kind='sing-box';latest=$release.tag_name;asset=$asset.name;installed=$version;path=$installedPath;locked=$usedFallback} | ConvertTo-Json -Compress"
-  ].join("; ");
+async function runCoreManager(action) {
+  const script = await bundledProbeScriptPath("core-manager.ps1", "Core updater");
+  const config = await Neutralino.filesystem.getJoinedPath(state.paths.work, "main.json");
+  const command = `& ${psQuote(script)} -Action ${action} -DestinationDir ${psQuote(state.paths.data)} -WorkDir ${psQuote(state.paths.work)} -ConfigPath ${psQuote(config)}; exit $LASTEXITCODE`;
+  const res = await Neutralino.os.execCommand(buildPowerShellExecCommand(command), { cwd: state.paths.work });
+  if (res.stdErr?.trim()) log(`Core updater: ${res.stdErr.trim().slice(0, 1200)}`);
+  if (Number(res.exitCode) !== 0) throw new Error(String(res.stdErr || "内核更新进程失败").trim().slice(0, 600));
+  const info = JSON.parse(String(res.stdOut || "{}").trim());
+  if (!info.latest || (action === "Install" && (!info.path || !info.sha256))) throw new Error("内核更新未返回完整校验结果");
+  return info;
+}
+
+function coreOperationStatus(text, mode = "") {
+  if ($("coreVersionStatus")) { $("coreVersionStatus").textContent = text; $("coreVersionStatus").setAttribute?.("data-state", mode); }
+  setCoreUpdateHint(mode === "error" ? "更新失败" : mode === "done" ? "已检查" : "检查中", mode === "error" ? "show" : "busy", text);
+  for (const id of ["checkCoreBtn", "downloadSingBoxBtn", "pickCoreBtn"]) if ($(id)) $(id).disabled = state.coreUpdateRunning;
 }
 
 function setCoreUpdateHint(text, mode, title) {
@@ -2133,19 +2112,6 @@ function setCoreUpdateHint(text, mode, title) {
   hint.textContent = text || "";
   hint.title = title || "";
   hint.className = `core-update-hint ${mode || ""}`.trim();
-}
-
-function coreVersionInfoScript(kind, corePath) {
-  return [
-    "$ErrorActionPreference='Stop'",
-    "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12",
-    "$headers=@{'User-Agent'='clash.meta/1.19.0'}",
-    "$release=Invoke-RestMethod -Headers $headers -Uri 'https://api.github.com/repos/SagerNet/sing-box/releases/latest'",
-    `$corePath=${psQuote(corePath || "")}`,
-    "$exists=Test-Path -LiteralPath $corePath",
-    "$local=if ($exists) { (& $corePath version 2>$null | Select-Object -First 1) } else { 'missing' }",
-    "[pscustomobject]@{kind='sing-box';latest=$release.tag_name;local=$local;exists=$exists;path=$corePath} | ConvertTo-Json -Compress"
-  ].join("; ");
 }
 
 function coreLocalInfoScript(kind, corePath) {
@@ -2169,12 +2135,8 @@ async function getCoreLocalInfo(kind, corePath) {
 }
 
 async function getCoreVersionInfo(kind, corePath) {
-  const ps = coreVersionInfoScript(kind, corePath);
-  const res = await Neutralino.os.execCommand(buildPowerShellExecCommand(ps), { cwd: state.paths.work });
-  if (res.exitCode !== 0 && res.exitCode !== undefined) {
-    throw new Error((res.stdErr || "").trim() || `${kind} version check failed`);
-  }
-  return JSON.parse(String(res.stdOut || "{}").trim() || "{}");
+  const local = await getCoreLocalInfo(kind, corePath);
+  return { ...local, ...await runCoreManager("Check") };
 }
 
 function renderCoreUpdateState(kind, info, status) {
@@ -2242,37 +2204,55 @@ async function ensureSelectedCoreReady(options = {}) {
 }
 
 async function downloadCoreLatest() {
-  saveSettings();
-  const zipPath = await Neutralino.filesystem.getJoinedPath(state.paths.work, "sing-box-latest.zip");
-  const extractPath = await Neutralino.filesystem.getJoinedPath(state.paths.work, "sing-box-latest-release");
-  const destinationPath = state.paths.bundledSingBox;
-  const fallbackPath = SmartProxyConfig.coreFallbackInstallPath(destinationPath, new Date().toISOString());
-  const ps = coreDownloadScript("sing-box", zipPath, extractPath, destinationPath, fallbackPath);
-  log("Downloading latest sing-box core");
-  const res = await Neutralino.os.execCommand(buildPowerShellExecCommand(ps), { cwd: state.paths.work });
-  if (res.exitCode !== 0 && res.exitCode !== undefined) {
-    throw new Error((res.stdErr || "").trim() || "sing-box download failed");
-  }
-  const output = String(res.stdOut || "").trim();
-  let info = null;
+  if (state.coreUpdateRunning) { log("Core install skipped: update operation already running"); return; }
+  state.coreUpdateRunning = true;
+  const previousPath = state.settings.singBoxPath;
+  coreOperationStatus("正在独立下载稳定版并校验官方 SHA256（最多 180 秒；官方受限时使用校验镜像）…");
+  log("Core update: official direct download; running core and installed files untouched");
   try {
-    info = JSON.parse(output || "{}");
+    const info = await runCoreManager("Install");
+    state.settings.singBoxPath = info.path;
+    try { await persistSettingsFile(); }
+    catch (error) { state.settings.singBoxPath = previousPath; throw error; }
+    writeSettingsToForm();
+    const message = `已安装 ${info.latest}，官方 SHA256 校验通过${info.source ? ` · ${info.source}` : ""}；下次手动启动代理生效，当前内核未重启`;
+    coreOperationStatus(message, "done"); log(message);
+    return info;
+  } catch (error) {
+    coreOperationStatus(`更新失败，原内核保留：${error.message || error}`, "error");
+    log(`Core update failed: ${error.message || error}`);
+    throw error;
+  } finally {
+    state.coreUpdateRunning = false;
+    for (const id of ["checkCoreBtn", "downloadSingBoxBtn", "pickCoreBtn"]) if ($(id)) $(id).disabled = false;
   }
-  catch (err) {
-    info = null;
-  }
-  const installedPath = info && info.path ? info.path : destinationPath;
-  state.settings.singBoxPath = installedPath;
-  writeSettingsToForm();
-  saveSettings();
-  if (info && info.locked) log(`sing-box core was busy, installed to ${installedPath}`);
-  log(output || "sing-box downloaded");
 }
 
 async function checkCoreVersions() {
-  saveSettings();
-  const info = await getCoreVersionInfo("sing-box", corePathForKind());
-  renderCoreUpdateState("sing-box", info, SmartProxyConfig.coreUpdateStatus(info));
+  if (state.coreUpdateRunning) { log("Core check skipped: update operation already running"); return; }
+  state.coreUpdateRunning = true;
+  let localVersion = "未检查";
+  coreOperationStatus("正在检查本地与官方稳定版（联网最多 20 秒）…");
+  try {
+    const local = await getCoreLocalInfo("sing-box", selectedCorePath());
+    localVersion = SmartProxyConfig.normalizeCoreVersion(local.local) || local.local;
+    const remote = await runCoreManager("Check");
+    const status = SmartProxyConfig.coreUpdateStatus({ ...local, ...remote });
+    let running = "未启动";
+    if (state.mainCoreReady) {
+      try { running = (await api(mainController(), MAIN_SECRET, "/version")).version || "未知"; }
+      catch (error) { running = "查询失败"; log(`Running core version read failed: ${error.message || error}`); }
+    }
+    const message = `运行中 ${running} · 已选择 ${localVersion} · 官方 ${remote.latest} · ${status.status === "latest" ? "已是最新版" : status.status === "update" ? "可下载更新" : "请检查本地内核"}`;
+    coreOperationStatus(message, "done"); log(message);
+    return { ...local, ...remote };
+  } catch (error) {
+    coreOperationStatus(`已选择 ${localVersion} · 检查失败：${error.message || error}`, "error");
+    log(`Core version check failed: ${error.message || error}`); throw error;
+  } finally {
+    state.coreUpdateRunning = false;
+    for (const id of ["checkCoreBtn", "downloadSingBoxBtn", "pickCoreBtn"]) if ($(id)) $(id).disabled = false;
+  }
 }
 
 function compileRegex(pattern, fallback) {
@@ -2356,7 +2336,7 @@ async function loadSourceConfig(options = {}) {
 }
 
 async function refreshSubscription() {
-  if (state.subscriptionBusy) return;
+  if (state.subscriptionBusy || state.autoRecoverBusy) { log("Manual subscription refresh skipped: another refresh is running"); return; }
   const button = $("refreshSubBtn");
   const previous = {
     sourceConfig: state.sourceConfig,
@@ -2383,18 +2363,24 @@ async function refreshSubscription() {
       source: "subscription"
     };
     await persistSettingsFile();
-    if (wasLive && !outcome.preserved) await applyRuntimeSettings();
+    if (wasLive) {
+      // Newly downloaded files are staged; don't label old running routes with new node identities.
+      state.sourceConfig = previous.sourceConfig; state.mergedSourceConfig = previous.mergedSourceConfig;
+      state.sourceConfigSubscriptionId = previous.sourceConfigSubscriptionId; state.nodes = previous.nodes;
+      state.subscriptionConfigs = previous.subscriptionConfigs; state.subscriptionNodeCatalog = previous.subscriptionNodeCatalog;
+      if (!outcome.preserved) await applyRuntimeSettings();
+    }
     setStatus();
     renderProxyNodes();
     if (outcome.preserved) {
+      recordSubscriptionRefresh(activeSubscription(), { lastCheckedAt: Date.now(), error: String(outcome.error || "更新失败，已保留本地缓存").slice(0, 300) });
       if ($("subscriptionStatus")) $("subscriptionStatus").textContent = "更新失败，继续使用本地缓存";
       log(`Subscription refresh unavailable; preserved cache remains active: ${outcome.error || "remote unavailable"}`);
     }
     else {
-      if ($("subscriptionStatus")) $("subscriptionStatus").textContent = "订阅已更新";
-      log(`Subscription refreshed via ${outcome.source}: ${state.nodes.length} candidate nodes`);
-      // 手动更新已把缓存应用到运行配置，后台预备的提醒随之完成。
-      if (state.pendingConfigApply && state.pendingConfigApply.profileId === state.settings.activeSubscriptionId) state.pendingConfigApply = null;
+      if ($("subscriptionStatus")) $("subscriptionStatus").textContent = wasLive ? "已下载，待下次手动启动生效" : "订阅缓存已更新";
+      recordSubscriptionRefresh(activeSubscription(), { lastSuccessAt: Date.now(), error: "", pending: wasLive });
+      log(`Subscription refreshed via ${outcome.source}: ${state.nodes.length} candidate nodes; running core unchanged`);
     }
     return outcome;
   }
@@ -2409,6 +2395,7 @@ async function refreshSubscription() {
     setStatus();
     renderProxyNodes();
     renderHomeTraffic();
+    recordSubscriptionRefresh(activeSubscription(), { lastCheckedAt: Date.now(), error: String(err.message || err).slice(0, 300) });
     if ($("subscriptionStatus")) $("subscriptionStatus").textContent = "更新失败，现有配置未改变";
     log(`Subscription refresh failed without changing active config: ${err.message || err}`);
     throw err;
@@ -2416,6 +2403,7 @@ async function refreshSubscription() {
   finally {
     if (button) button.textContent = "更新当前订阅";
     setSubscriptionBusy(false);
+    renderSubscriptionRefreshStatus();
   }
 }
 
@@ -2745,6 +2733,12 @@ async function startMainCoreWithRetries(options = {}) {
       }
       setStatus();
       renderProxyNodes();
+      if (localSourceReady) {
+        state.pendingConfigApply = null;
+        for (const profile of state.settings.subscriptions || []) {
+          if (state.subscriptionConfigs.has(profile.id) && state.settings.subscriptionRefreshStatus?.[profile.id]?.pending) recordSubscriptionRefresh(profile, { pending: false });
+        }
+      }
       log(`Main core ready on attempt ${attempt}`);
       return proc;
     }
@@ -3075,7 +3069,7 @@ async function api(baseUrl, secret, path, options = {}) {
   const abort = () => controller.abort();
   options.signal?.addEventListener("abort", abort, { once: true });
   if (options.signal?.aborted) abort();
-  const timer = setTimeout(abort, CONTROLLER_REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(abort, options.timeoutMs || CONTROLLER_REQUEST_TIMEOUT_MS);
   try {
     const res = await fetch(`${baseUrl}${path}`, { ...options, signal: controller.signal,
       headers: { Authorization: `Bearer ${secret}`, "Content-Type": "application/json", ...(options.headers || {}) } });
@@ -3571,6 +3565,7 @@ async function resolveProbeNodeRuntime() {
 }
 
 async function ensureCodexProbeReady() {
+  if (state.networkProbeJob) throw new Error("网络测试正在运行，请先停止它");
   if (state.codexProbeLanesDisabled) throw new Error("探测端口被占用；主代理已降级启动，当前不能测速");
   const live = state.mainCoreReady
     || await probeControllerLive(mainController(), MAIN_SECRET, 700).catch(() => false);
@@ -3996,7 +3991,7 @@ async function runBatchTokProbe(items, options = {}) {
   const command = [quote(nodePath), quote(scriptPath), "--ports", quote(usable.map(item => Number(item.port)).join(",")),
     "--profile", profile === "tokenmix" ? "tokenmix" : "codex", "--concurrency", "4", "--timeout-seconds", "30",
     "--tokenmix-key-file", quote(TOKENMIX_TOK_PROBE_KEY_FILE), "--codex-homes-root", quote(CODEX_TOK_PROBE_HOMES_ROOT),
-    "--codex-model", quote(CODEX_TOK_PROBE_MODEL), "--tokenmix-model", quote(TOKENMIX_TOK_PROBE_MODEL)].join(" ");
+    "--codex-model", quote(state.settings.benchmarkCodexModel || CODEX_TOK_PROBE_MODEL), "--tokenmix-model", quote(TOKENMIX_TOK_PROBE_MODEL)].join(" ");
   const payload = await new Promise(async (resolve, reject) => {
     let buffer = "", stderr = "", result = null, settled = false, watchdog = null;
     const early = [];
@@ -4050,6 +4045,7 @@ async function runBatchTokProbe(items, options = {}) {
       }, Math.max(120000, (usable.length * 2 + 12) * 32000));
     } catch (err) { finish(err); }
   });
+  state.modelProbeNotice = payload.channelFailure ? `模型测速不可用：${payload.channelFailure.error}；不代表节点不可达。` : "";
   byPort.roundInfo = payload;
   if (payload.cancelled || payload.channelFailure) state.lastProbeRoundId = "";
   for (const record of payload.outcomes || []) byPort.set(Number(record.port), record.value);
@@ -4132,6 +4128,7 @@ function codexSuccessfulCatalogEntries(entries) {
 }
 
 async function requestCodexProbeCancel() {
+  state.networkProbeJob?.abort();
   state.codexProbeCancelRequested = true;
   if (state.probeJob?.proc) {
     try { await Neutralino.os.updateSpawnedProcess(state.probeJob.proc.id, "stdIn", '{"action":"cancel"}\n'); }
@@ -4492,7 +4489,7 @@ async function readCachedSubscriptionConfig(profile) {
 // 证据只有两种：① 一轮测速里该订阅 ≥ ENDPOINT_AUTO_RECOVER_RATIO 的节点连接级(node-scope)失败；
 // ② 缓存年龄超过机场声明的 Profile-Update-Interval（默认 24h）。
 // 命中后：后台拉新订阅 → 比对入口 host:port 集合 → 直连 TCP 探测新入口 → 只写缓存并提醒。
-// 运行中的内核、当前节点、活动连接一律不动；应用新配置只发生在「更新当前订阅」或下次手动启动代理。
+// 运行中的内核、当前节点、活动连接一律不动；新配置在下次手动启动代理时生效。
 // 2026-09-14 实例：lovenao 换中转域名但保留旧域名 DNS 记录，DNS 诊断永远“正常”，
 // 只有测速里 40/40 dial tcp i/o timeout 和线上订阅入口已变这两条证据能抓到。
 
@@ -4556,17 +4553,20 @@ async function stageSubscriptionRefresh(profile, reason, evidence = "") {
     const previous = await readCachedSubscriptionConfig(profile) || state.subscriptionConfigs.get(profile.id) || null;
     const downloaded = await downloadSubscriptionForProfile(profile, "auto-refresh");
     if (!downloaded) {
+      recordSubscriptionRefresh(profile, { lastCheckedAt: Date.now(), error: "下载失败；保留缓存，冷却 20 分钟后重试" });
       log(`Subscription auto-refresh (${reason}) for ${name}: download failed; cache and running core unchanged`);
       return { profileId: profile.id, name, reason, downloaded: false };
     }
     const next = validateSubscriptionText(downloaded.configText, `订阅 ${name}`);
     const diff = SmartProxyConfig.diffSubscriptionEndpoints(previous, next);
-    const outcome = { profileId: profile.id, name, reason, downloaded: true, diff, reachable: [], unreachable: [] };
-    if (!diff.changed) {
+    const contentChanged = JSON.stringify(previous) !== JSON.stringify(next);
+    recordSubscriptionRefresh(profile, { lastCheckedAt: Date.now(), lastSuccessAt: Date.now(), error: "", pending: contentChanged || !!state.settings.subscriptionRefreshStatus?.[profile.id]?.pending });
+    const outcome = { profileId: profile.id, name, reason, downloaded: true, diff, contentChanged, reachable: [], unreachable: [] };
+    if (!contentChanged) {
       const pending = state.pendingConfigApply;
       if (pending && pending.profileId === profile.id) {
-        log(`Subscription auto-refresh (${reason}) for ${name}: upstream unchanged since the staged refresh; still waiting for 更新当前订阅 or a manual proxy start`);
-        if ($("subscriptionStatus")) $("subscriptionStatus").textContent = `${name} 新订阅已就绪：点「更新当前订阅」或下次手动启动代理生效`;
+        log(`Subscription auto-refresh (${reason}) for ${name}: upstream unchanged since staged refresh; waiting for a manual proxy start`);
+        if ($("subscriptionStatus")) $("subscriptionStatus").textContent = `${name} 已下载，待下次手动启动代理生效`;
       }
       else {
         log(`Subscription auto-refresh (${reason}) for ${name}: upstream entry endpoints unchanged (${diff.next}); cache and headers refreshed, nothing to apply`);
@@ -4581,10 +4581,7 @@ async function stageSubscriptionRefresh(profile, reason, evidence = "") {
     outcome.unreachable = probes.filter((probe) => !probe.ok).map((probe) => probe.endpoint);
     const probeText = probes.map((probe) => `${probe.endpoint}=${probe.ok ? `${probe.ms}ms` : "fail"}`).join(", ") || "not probed";
     log(`Subscription auto-refresh (${reason}) for ${name}: entry endpoints changed +${diff.added.length}/-${diff.removed.length}; new entries reachable ${outcome.reachable.length}/${probes.length} (${probeText})`);
-    if (!outcome.reachable.length) {
-      log(`Subscription auto-refresh (${reason}) for ${name}: new entries unreachable from this machine; cache updated, no apply reminder issued`);
-      return outcome;
-    }
+    if (!outcome.reachable.length) log(`Subscription auto-refresh (${reason}) for ${name}: new entries not verified; cache staged, reachability is advisory only`);
     state.pendingConfigApply = {
       at: Date.now(), profileId: profile.id, name, reason,
       added: diff.added.length, removed: diff.removed.length,
@@ -4594,11 +4591,13 @@ async function stageSubscriptionRefresh(profile, reason, evidence = "") {
     return outcome;
   }
   catch (err) {
+    recordSubscriptionRefresh(profile, { lastCheckedAt: Date.now(), error: String(err.message || err).slice(0, 300) });
     log(`Subscription auto-refresh (${reason}) for ${name} failed: ${err.message || err}; running core unchanged`);
     return null;
   }
   finally {
     state.autoRecoverBusy = false;
+    renderSubscriptionRefreshStatus();
   }
 }
 
@@ -4653,12 +4652,12 @@ async function subscriptionScheduledRefreshTick() {
     let stats = null;
     try { stats = await Neutralino.filesystem.getStats(path); }
     catch { stats = null; }
-    if (!stats) continue;   // 从未下载过的订阅没有“年龄”，交给保存/更新按钮
+    // Missing caches are due too; download failures must not postpone the next attempt for 24h.
     const headersText = await readTextIfExists(await subscriptionHeadersCachePathFor(profile));
     const hours = SmartProxyConfig.parseProfileUpdateIntervalHours(headersText, SUBSCRIPTION_REFRESH_DEFAULT_HOURS);
-    const modifiedAt = Number(stats.modifiedAt || 0);
-    const lastAt = state.subscriptionRefreshLastAt.get(profile.id) || 0;
-    const since = Math.max(modifiedAt, lastAt);
+    const rawModified = Number(stats?.modifiedAt || 0);
+    const modifiedAt = rawModified > 0 && rawModified < 1e12 ? rawModified * 1000 : rawModified;
+    const since = Math.max(modifiedAt, Number(state.settings.subscriptionRefreshStatus?.[profile.id]?.lastSuccessAt || 0));
     const ageMs = since ? Date.now() - since : Infinity;
     if (ageMs < hours * 3600 * 1000) continue;
     const ageText = Number.isFinite(ageMs) ? `${Math.round(ageMs / 3600000)}h` : "unknown";
@@ -4679,11 +4678,11 @@ function scheduleConfigApply() {
   const pending = state.pendingConfigApply;
   if (!pending || pending.notified) return;
   pending.notified = true;
-  log(`Refreshed subscription ready (${pending.name}: entry endpoints +${pending.added}/-${pending.removed}, ${pending.reachable}/${pending.probed} new entries reachable); running core unchanged, apply via 更新当前订阅 or next manual proxy start`);
-  if ($("subscriptionStatus")) $("subscriptionStatus").textContent = `${pending.name} 新订阅已就绪：点「更新当前订阅」或下次手动启动代理生效`;
+  log(`Refreshed subscription ready (${pending.name}: entry endpoints +${pending.added}/-${pending.removed}, ${pending.reachable}/${pending.probed} new entries reachable); running core unchanged, apply on next manual proxy start`);
+  if ($("subscriptionStatus")) $("subscriptionStatus").textContent = `${pending.name} 已下载，待下次手动启动代理生效`;
   if (Neutralino.os && typeof Neutralino.os.showNotification === "function") {
     Neutralino.os.showNotification("Smart Proxy：新订阅已就绪",
-      `${pending.name} 入口已变更（新增 ${pending.added}，可连通 ${pending.reachable}）；当前代理不重启，点「更新当前订阅」或下次手动启动时生效`).catch(() => {});
+      `${pending.name} 配置已下载（新增入口 ${pending.added}，已验证连通 ${pending.reachable}）；当前代理不重启，下次手动启动时生效`).catch(err => log(`Subscription notification failed: ${err.message || err}`));
   }
 }
 
@@ -4715,7 +4714,7 @@ function recordSiteFailoverSignal(level, payload) {
     state.siteFailoverGuard = SmartProxySiteFailover.createGuard({
       log,
       settings: () => state.settings,
-      snapshot: () => ({ ready: state.mainCoreReady && state.siteFailoverLogReady && !state.closing,
+      snapshot: () => ({ ready: state.mainCoreReady && state.siteFailoverLogReady && !state.closing && !state.networkProbeJob && !state.codexProbeRunning,
         node: state.currentNode, revision: state.siteFailoverRevision }),
       candidates: async excluded => {
         const group = await api(mainController(), MAIN_SECRET, `/proxies/${encodeURIComponent(state.settings.targetGroup)}`);
@@ -4729,7 +4728,7 @@ function recordSiteFailoverSignal(level, payload) {
 }
 
 async function applySiteFailoverSelection(node, context) {
-  const allowed = () => state.settings.siteFailoverEnabled === true && !state.closing && state.mainCoreReady
+  const allowed = () => state.settings.siteFailoverEnabled === true && !state.closing && state.mainCoreReady && !state.networkProbeJob && !state.codexProbeRunning
     && state.siteFailoverRevision === context.revision && context.valid();
   if (!allowed()) { log("[site-failover] selection cancelled: settings/manual intent changed"); return false; }
   const groupName = state.settings.targetGroup;
@@ -4976,9 +4975,104 @@ function startNodeGuard() {
   setTimeout(() => { refreshEndpointDnsHealth({ force: true }).catch(err => log(`DNS diagnosis failed: ${err.message || err}`)); }, 3000);
 }
 
+function recordSubscriptionRefresh(profile, patch) {
+  const statuses = state.settings.subscriptionRefreshStatus ||= {};
+  statuses[profile.id] = { ...(statuses[profile.id] || {}), ...patch };
+  scheduleSettingsPersist("subscription refresh status");
+  renderSubscriptionRefreshStatus();
+}
+
+function renderSubscriptionRefreshStatus() {
+  const box = $("subscriptionRefreshDetails");
+  if (!box) return;
+  const profiles = state.settings.subscriptions || [];
+  box.innerHTML = profiles.filter(p => p.url).map(profile => {
+    const s = state.settings.subscriptionRefreshStatus?.[profile.id] || {};
+    const time = s.lastSuccessAt ? new Date(s.lastSuccessAt).toLocaleString("zh-CN", { hour12: false }) : "尚无本版更新记录";
+    return `<div class="refresh-row"><strong>${escapeHtml(profile.name)}</strong><span>${escapeHtml(time)}</span><b class="${s.error ? "bad" : s.pending ? "pending" : "muted"}">${escapeHtml(s.error || (s.pending ? "已下载 · 待下次手动启动生效" : "运行配置保持不变"))}</b></div>`;
+  }).join("") || "添加订阅后，会在这里显示下载结果。";
+  if ($("subscriptionScheduleHint")) $("subscriptionScheduleHint").textContent = state.settings.autoRecoverOnEndpointFailure === false
+    ? "自动更新已关闭；缓存与现有节点保留。" : "自动更新已开启 · 按机场周期（默认 24 小时）检查，失败冷却 20 分钟重试 · 不重启代理";
+}
+
+function showNetworkError(error) {
+  state.networkProgress = `网络测试未完成：${error.message || error}`;
+  log(state.networkProgress);
+  if ($("networkScoreSummary")) $("networkScoreSummary").textContent = state.networkProgress;
+}
+
+async function testNetworkNodes(filter = {}) {
+  if (state.networkProbeJob) { state.networkProbeJob.abort(); state.networkProgress = "正在停止…"; renderNetworkProbeState(state.subscriptionNodeCatalog); renderProxyNodes(); return; }
+  if (state.codexProbeRunning) throw new Error("模型测速正在运行，请先停止它");
+  const controller = new AbortController();
+  state.networkProbeJob = controller;
+  state.networkProgress = "正在读取运行中节点…";
+  renderNetworkProbeState(state.subscriptionNodeCatalog);
+  try {
+    // No subscription download, expiry check, account, model or extra core is required.
+    const runtime = await api(mainController(), MAIN_SECRET, "/proxies", { signal: controller.signal });
+    const live = runtime.proxies || {};
+    const catalog = state.subscriptionNodeCatalog.length ? state.subscriptionNodeCatalog : state.nodes.map(node => ({ key: node, node, tag: node }));
+    const entries = catalog.filter(e => (!filter.key || e.key === filter.key) && (!filter.group || e.subscriptionId === filter.group));
+    if (!entries.length) throw new Error("没有缓存节点；请先导入订阅或离线 YAML");
+    state.networkPendingKeys = new Set(entries.map(e => e.key));
+    state.networkProgress = `网络测试 0/${entries.length}`; renderProxyNodes();
+    log(`Network test started: ${entries.length} cached nodes, HTTPS gstatic, concurrency <=4; no switching`);
+    const round = await SmartProxyNetwork.runRound(entries, {
+      signal: controller.signal, log,
+      probe: async (entry, signal) => {
+        const tag = String(entry.tag || entry.node);
+        if (!live[tag]) throw Object.assign(new Error("此节点尚未载入运行内核，待下次手动启动后测试"), { scope: "local" });
+        try {
+          const result = await api(mainController(), MAIN_SECRET, `/proxies/${encodeURIComponent(tag)}/delay?timeout=5000&url=${encodeURIComponent("https://www.gstatic.com/generate_204")}`, { signal, timeoutMs: 6500 });
+          return result?.delay;
+        } catch (error) {
+          if (/^(401|403|404)\b/.test(error.message || "")) error.scope = "local";
+          throw error;
+        }
+      },
+      onProgress: ({ completed, total, entry, value, phase }) => {
+        state.networkPendingKeys.delete(entry.key);
+        const store = state.settings.networkProbeStore ||= {};
+        store[entry.key] = SmartProxyNetwork.merge(store[entry.key], value);
+        state.networkProgress = `网络测试 ${completed}/${total}${phase === "control" ? " · 低并发对照复测" : ""}`;
+        renderProxyNodes();
+      }
+    });
+    const store = state.settings.networkProbeStore ||= {};
+    for (const [key, value] of round.results) {
+      store[key] = SmartProxyNetwork.merge(store[key], value);
+      if (value.status === "error") log(`Network test ${key}: ${value.failureScope}: ${value.error}`);
+    }
+    const ok = [...round.results.values()].filter(v => v.status === "done").length;
+    state.networkProgress = `${round.cancelled ? "已停止" : "网络测试完成"} · ${ok}/${entries.length} 可达 · 延迟不是带宽或模型速度 · 当前节点未切换`;
+    log(`${state.networkProgress}; peak concurrency ${round.peak}`);
+    scheduleSettingsPersist("network test results");
+    evaluateBenchmarkSubscriptionEvidence(entries, round.results, { cancelled: round.cancelled });
+    return round;
+  } finally {
+    state.networkProbeJob = null; state.networkPendingKeys.clear(); renderNetworkProbeState(state.subscriptionNodeCatalog); renderProxyNodes();
+  }
+}
+
+function renderNetworkProbeState(entries) {
+  if ($("testNetworkBtn")) { $("testNetworkBtn").textContent = state.networkProbeJob ? "停止网络测试" : "一键网络测试"; $("testNetworkBtn").disabled = state.codexProbeRunning; }
+  if ($("testAllCodexBtn")) $("testAllCodexBtn").disabled = !!state.networkProbeJob;
+  if ($("networkScoreSummary")) $("networkScoreSummary").textContent = state.networkProgress || `${entries.length} 个缓存节点 · HTTPS 连通与延迟 · 无需模型账户，订阅过期仍可测试`;
+}
+
+function networkMetric(entry) {
+  if (state.networkPendingKeys.has(entry.key)) return { text: "网络测试中…", title: "使用运行中通道，不切节点", css: "busy" };
+  const r = state.settings.networkProbeStore?.[entry.key];
+  if (!r) return { text: "网络未测", title: "网络测试不消耗模型额度", css: "muted" };
+  if (r.status === "done") return { text: `${r.delayMs} ms`, title: `HTTPS 连接延迟 · ${new Date(r.measuredAt).toLocaleString()}`, css: "fast" };
+  const label = r.status === "cancelled" ? "已停止" : r.failureScope === "local" ? "待载入" : r.failureScope === "round" ? "环境待确认" : "目标未达";
+  return { text: label, title: `${r.error || label}${r.lastSuccess ? `；历史 ${r.lastSuccess.delayMs} ms（${new Date(r.lastSuccess.measuredAt).toLocaleString()}）` : ""}`, css: "muted" };
+}
+
 function renderProxyNodes() {
   if (state.currentView !== "proxy-nodes") return;
-  if (state.codexProbeRunning && !state.proxyRenderFlushing) {
+  if ((state.codexProbeRunning || state.networkProbeJob) && !state.proxyRenderFlushing) {
     if (!state.proxyRenderTimer) {
       state.proxyRenderTimer = setTimeout(() => {
         state.proxyRenderTimer = null;
@@ -4992,7 +5086,7 @@ function renderProxyNodes() {
   const box = $("nodeGroups");
   if (!box) return;
   const active = activeSubscription();
-  const entries = state.subscriptionNodeCatalog.length
+  const allEntries = state.subscriptionNodeCatalog.length
     ? state.subscriptionNodeCatalog
     : getSwitchableNodes(state.nodes.length ? state.nodes : getCandidateNodes()).map((node) => ({
       key: subscriptionNodeKey(active, node),
@@ -5003,6 +5097,11 @@ function renderProxyNodes() {
       tag: node
     }));
 
+  const query = String($("nodeSearch")?.value || "").trim().toLowerCase();
+  const filter = $("nodeFilter")?.value || "all";
+  const entries = allEntries.filter(entry => (!query || `${entry.node} ${(entry.subscriptionNames || [entry.subscriptionName]).join(" ")}`.toLowerCase().includes(query))
+    && (filter !== "reachable" || state.settings.networkProbeStore?.[entry.key]?.status === "done")
+    && (filter !== "current" || (entry.tag || entry.node) === state.currentNode));
   const resultOf = (entry) => state.nodeCodexResults.get(entry.key) || null;
 
   const groups = [];
@@ -5043,10 +5142,11 @@ function renderProxyNodes() {
       const groupRunning = state.codexProbeRunning && state.codexProbeMode === "group"
         && group.entries.some((entry) => entry.key === state.codexProbeBusyKey || state.codexProbePendingKeys.has(entry.key));
       const statText = [`${group.entries.length} 节点`]
-        .concat(reachable ? [`可达 ${reachable}`] : [])
-        .concat(blocked ? [`拒 ${blocked}`] : [])
+        .concat([`网络可达 ${group.entries.filter(e => state.settings.networkProbeStore?.[e.key]?.status === "done").length}`])
+        .concat(reachable ? [`模型成绩 ${reachable}`] : [])
+        .concat(blocked ? [`模型未通过 ${blocked}`] : [])
         .join(" · ");
-      const collapsed = state.nodeGroupCollapsed.has(group.id);
+      const collapsed = !query && filter === "all" && state.nodeGroupCollapsed.has(group.id);
       const rows = collapsed ? "" : sorted.map((entry) => {
         const meta = SmartProxyConfig.nodeDisplayMeta(entry.node);
         const result = resultOf(entry);
@@ -5089,16 +5189,19 @@ function renderProxyNodes() {
           else { metric = "已停止"; }
         }
         const codex = nodeCodexPresentation(result, entry.key);
+        const network = networkMetric(entry);
         const tag = current ? "当前" : prepared ? "已准备" : fastest ? "本轮候选" : "";
         return `
-          <div class="node-row ${current || prepared ? "current" : ""} ${result && result.anthropicOk === false ? "blocked" : ""}" data-select-node="${escapeHtml(entry.node)}" data-node-key="${escapeHtml(entry.key)}" title="${escapeHtml(`${entry.subscriptionName} / ${entry.node}`)}&#10;${escapeHtml(codex.title)}">
+          <div tabindex="0" role="button" aria-label="选择 ${escapeHtml(entry.node)}" class="node-row ${current || prepared ? "current" : ""} ${result && result.anthropicOk === false ? "blocked" : ""}" data-select-node="${escapeHtml(entry.node)}" data-node-key="${escapeHtml(entry.key)}" title="${escapeHtml(`${entry.subscriptionName} / ${entry.node}`)}&#10;${escapeHtml(codex.title)}">
             <span class="node-dot ${dot}"></span>
             <span class="node-group-chip${groupCooldownActive(classifyNodeGroup(entry).id) ? " cooling" : ""}${current ? " current" : ""}" title="分组 ${escapeHtml(classifyNodeGroup(entry).label)}${groupCooldownActive(classifyNodeGroup(entry).id) ? "（抖动冷却中）" : ""}${current ? " · 当前所在组" : ""}">${escapeHtml(classifyNodeGroup(entry).id)}</span>
             <span class="node-ico">${escapeHtml(meta.icon)}</span>
             <span class="node-label">${escapeHtml(meta.shortName)}</span>
-            <span class="node-metric ${metricClass}">${escapeHtml(metric)}</span>
+            <span class="network-metric ${network.css}" title="${escapeHtml(network.title)}">${escapeHtml(network.text)}</span>
+            <span class="node-metric ${metricClass}" title="模型测速：${escapeHtml(codex.title)}">${escapeHtml(metric)}</span>
             <span class="node-tag ${fastest && !current ? "gold" : ""}">${escapeHtml(tag)}</span>
-            <button class="node-retest" data-codex-probe-key="${escapeHtml(entry.key)}" title="单独复测该节点" ${state.codexProbeRunning && state.codexProbeBusyKey !== entry.key ? "disabled" : ""}>⟳</button>
+            <button class="node-network" data-network-probe-key="${escapeHtml(entry.key)}" title="测试网络连通性与延迟" ${state.codexProbeRunning || state.networkProbeJob ? "disabled" : ""}>网络</button>
+            <button class="node-retest" data-codex-probe-key="${escapeHtml(entry.key)}" title="模型测速（消耗账户额度）" ${state.networkProbeJob || state.codexProbeRunning && state.codexProbeBusyKey !== entry.key ? "disabled" : ""}>模型</button>
           </div>`;
       }).join("");
       return `
@@ -5114,13 +5217,14 @@ function renderProxyNodes() {
           ${collapsed ? "" : `<div class="node-grid">${rows}</div>`}
         </section>`;
     }).join("")
-    : `<div class="empty-grid">暂无订阅或离线 YAML 节点</div>`;
+    : `<div class="empty-grid">${allEntries.length ? "没有匹配节点，请调整搜索或筛选条件" : "暂无缓存节点 · 请在订阅页添加订阅或导入离线 YAML"}</div>`;
 
   if ($("testAllCodexBtn")) {
     $("testAllCodexBtn").textContent = state.codexProbeRunning && state.codexProbeMode !== "single" && state.codexProbeMode !== "group"
       ? "停止全测"
-      : "一键全测";
+      : "模型全测";
   }
+  renderNetworkProbeState(entries);
   const summaryBox = $("nodeScoreSummary");
   if (!summaryBox) return;
   if (!entries.length) {
@@ -5142,12 +5246,12 @@ function renderProxyNodes() {
       return !!result?.lastAttempt && !["done", "cancelled"].includes(result.lastAttempt.status);
     }).length;
     const guard = state.nodeGuardLast;
-    const guardText = guard ? ` · 守护${guard.ok ? "正常" : "告警"} ${Math.max(0, Math.round((Date.now() - guard.at) / 1000))}s 前` : "";
+    const guardText = guard && !guard.skipped && guard.ok !== null ? ` · 守护${guard.ok ? "正常" : "告警"} ${Math.max(0, Math.round((Date.now() - guard.at) / 1000))}s 前` : "";
     const globalBestResult = globalBestEntry ? resultOf(globalBestEntry) : null;
     const bestText = globalBestEntry && globalBestResult
       ? ` · 本轮复测候选 ${globalBestEntry.subscriptionName}/${globalBestEntry.node} ${Number(globalBestResult.tokPerSec).toFixed(1)} tok/s`
       : "";
-    summaryBox.textContent = `${entries.length} 节点 · 有成绩 ${reachableTotal} · 本次未通过 ${blockedTotal}${bestText}${guardText} · 测速不切节点`;
+    summaryBox.textContent = `${state.modelProbeNotice}${entries.length} 节点 · 有成绩 ${reachableTotal} · 本次未通过 ${blockedTotal}${bestText}${guardText} · 测速不切节点`;
   }
 }
 
@@ -5397,8 +5501,19 @@ async function bindEvents() {
   if ($("refreshSystemNetworkOptimizeStatusBtn")) $("refreshSystemNetworkOptimizeStatusBtn").addEventListener("click", () => refreshSystemNetworkOptimizeStatus({ logResult: true }).catch((err) => log(`System network optimization status failed: ${err.message || err}`)));
   $("checkCoreBtn").addEventListener("click", () => checkCoreVersions().catch((err) => log(`Check core versions failed: ${err.message || err}`)));
   $("downloadSingBoxBtn").addEventListener("click", () => downloadCoreLatest()
-    .then(() => ensureSelectedCoreReady({ autoRepairMissing: false }))
     .catch((err) => log(`Download sing-box failed: ${err.message || err}`)));
+  $("benchmarkCodexModel")?.addEventListener("change", () => {
+    const model = $("benchmarkCodexModel").value.trim();
+    if (!/^[a-zA-Z0-9._-]{1,100}$/.test(model)) { $("benchmarkCodexModel").value = state.settings.benchmarkCodexModel || CODEX_TOK_PROBE_MODEL; return; }
+    state.settings.benchmarkCodexModel = model;
+    scheduleSettingsPersist("benchmark model");
+  });
+  $("testNetworkBtn")?.addEventListener("click", () => testNetworkNodes().catch(showNetworkError));
+  $("nodeSearch")?.addEventListener("input", renderProxyNodes);
+  $("nodeFilter")?.addEventListener("change", renderProxyNodes);
+  $("nodeGroups").addEventListener("keydown", event => {
+    if (["Enter", " "].includes(event.key) && event.target.matches("[data-select-node]")) { event.preventDefault(); event.target.click(); }
+  });
   $("saveSettingsBtn").addEventListener("click", () => saveSettings({ applyRuntime: true }));
   if ($("continuousWssAutoSwitchEnabled")) {
     $("continuousWssAutoSwitchEnabled").addEventListener("change", () => {
@@ -5432,6 +5547,8 @@ async function bindEvents() {
     }
   });
   $("nodeGroups").addEventListener("click", (event) => {
+    const networkButton = event.target.closest("[data-network-probe-key]");
+    if (networkButton) { event.stopPropagation(); testNetworkNodes({ key: networkButton.dataset.networkProbeKey }).catch(showNetworkError); return; }
     const probeButton = event.target.closest("[data-codex-probe-key]");
     if (probeButton) {
       event.stopPropagation();
@@ -5452,8 +5569,7 @@ async function bindEvents() {
     }
     const groupButton = event.target.closest("[data-test-group]");
     if (groupButton) {
-      testCodexGroup(groupButton.dataset.testGroup)
-        .catch((err) => log(`Group probe failed: ${err.message || err}`));
+      testNetworkNodes({ group: groupButton.dataset.testGroup }).catch(showNetworkError);
       return;
     }
     const button = event.target.closest("[data-select-node]");
@@ -5803,12 +5919,16 @@ async function boot() {
     const surfaceReady = document.readyState !== "loading" && !!document.querySelector(".app")
       && !!document.getElementById("removeOfflineYamlBtn") && document.getElementById("probeProfile")?.options.length === 2
       && !!document.getElementById("siteFailoverTargets") && !!document.getElementById("siteFailoverEnabled")
-      && typeof SmartProxySiteFailover !== "undefined" && typeof SmartProxySiteFailover.createGuard === "function";
+      && typeof SmartProxySiteFailover !== "undefined" && typeof SmartProxySiteFailover.createGuard === "function"
+      && typeof SmartProxyNetwork !== "undefined" && typeof SmartProxyNetwork.runRound === "function"
+      && !!document.getElementById("testNetworkBtn") && !!document.getElementById("coreVersionStatus")
+      && !!document.getElementById("subscriptionRefreshDetails");
     let probeResourcesReady = false;
     try {
       const dualModelScript = await dualModelProbeScriptPath();
       const codexSubscriptionScript = await codexSubscriptionProbeScriptPath();
-      probeResourcesReady = await access(dualModelScript) && await access(codexSubscriptionScript);
+      const coreManagerScript = await bundledProbeScriptPath("core-manager.ps1", "Core updater");
+      probeResourcesReady = await access(dualModelScript) && await access(codexSubscriptionScript) && await access(coreManagerScript);
     }
     catch (err) {
       log(`Probe resource verification failed: ${err.message || err}`);

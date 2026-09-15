@@ -297,7 +297,7 @@ assert.doesNotMatch(
   "saving configuration must leave the running core and selected node untouched"
 );
 assert.match(mainScript, /dual-model-probe\.js/, "the UI must launch one out-of-process batch helper per round");
-assert.match(mainScript, /gpt-5\.3-codex-spark/, "the Codex subscription model must remain in the pool");
+assert.match(mainScript, /benchmarkCodexModel/, "the Codex model is explicit and configurable, never silently swapped mid-round");
 assert.match(mainScript, /gpt-4o-mini/, "the TokenMix model must be restored as the second pool member");
 assert.doesNotMatch(
   mainScript,

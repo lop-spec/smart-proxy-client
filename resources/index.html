@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Smart Proxy Client</title>
     <link rel="icon" href="/icons/appIcon.png">
-    <link rel="stylesheet" href="/styles.css?v=2026-08-05-jitter-groups-b">
+    <link rel="stylesheet" href="/styles.css?v=2026-09-15-workspace-1.3">
   </head>
   <body>
     <div class="app">
@@ -17,13 +17,16 @@
           </div>
           <div class="brand-copy">
             <strong>Smart Proxy</strong>
-            <span>v35 · CF Upload</span>
+            <span>1.3 · 网络工作台</span>
           </div>
         </div>
 
         <nav class="nav-list">
-          <button class="nav active" data-view="home"><span class="nav-icon">⌂</span><span>首页</span></button>
+          <button class="nav active" data-view="home"><span class="nav-icon">⌂</span><span>概览</span></button>
           <button class="nav" data-view="proxy-nodes"><span class="nav-icon">◎</span><span>节点</span></button>
+          <button class="nav" data-view="subscriptions"><span class="nav-icon">↻</span><span>订阅</span></button>
+          <button class="nav" data-view="core"><span class="nav-icon">◇</span><span>内核</span></button>
+          <div class="nav-divider">诊断与配置</div>
           <button class="nav" data-view="connections"><span class="nav-icon">⇄</span><span>连接</span></button>
           <button class="nav" data-view="logs"><span class="nav-icon">≣</span><span>日志</span></button>
           <button class="nav" data-view="settings"><span class="nav-icon">⚙</span><span>设置</span></button>
@@ -37,6 +40,7 @@
 
       <main class="content">
         <section id="view-home" class="view active">
+          <header class="page-head"><div><span class="eyebrow">WORKSPACE</span><h1>连接概览</h1><p>运行状态一目了然，变更由你决定。</p></div><span class="panel-badge">本地优先 · 手动选点</span></header>
           <div id="hero" class="hero off">
             <div class="hero-copy">
               <span class="eyebrow">当前状态</span>
@@ -54,7 +58,7 @@
               </div>
               <div class="kv">
                 <span>目标组</span><b id="homeGroup">-</b>
-                <span>所在组</span><b id="homeNodeGroup" title="当前节点所属分组；抖动熔断按组号 A→B→C→D 顺序挑选逃生目标组">-</b>
+                <span>所在组</span><b id="homeNodeGroup" title="当前节点所属诊断分组；抖动仅记录，不自动切换">-</b>
                 <span>当前节点</span><b id="homeNode">-</b>
                 <span>运行模式</span><b id="homeMode">手动选点</b>
               </div>
@@ -78,9 +82,22 @@
               </div>
             </section>
 
+            <section class="panel quick-start">
+              <div class="panel-head"><h2>常用操作</h2></div>
+              <button class="nav shortcut" data-view="proxy-nodes"><b>测试缓存节点 →</b><small>网络延迟与模型速度分开，不自动切节点</small></button>
+              <button class="nav shortcut" data-view="subscriptions"><b>管理订阅 →</b><small>查看下载结果；过期或更新失败仍保留缓存</small></button>
+              <button class="nav shortcut" data-view="core"><b>检查内核 →</b><small>官方稳定版 · 校验安装 · 下次手动启动生效</small></button>
+              <p class="notice">保存配置、更新订阅和内核不会重启当前代理。</p>
+            </section>
+          </div>
+        </section>
+
+        <section id="view-subscriptions" class="view">
+          <header class="page-head"><div><span class="eyebrow">SOURCES</span><h1>订阅与缓存</h1><p>订阅过期不等于每个节点都已失效。</p></div></header>
+          <div class="dashboard-grid">
             <section class="panel">
               <div class="panel-head">
-                <h2>订阅</h2>
+                <h2>管理订阅</h2>
                 <span id="subscriptionStatus" class="panel-badge muted">未获取节点</span>
               </div>
               <div class="subscription-selector-row">
@@ -96,7 +113,7 @@
                 <input id="homeSubscriptionName" placeholder="例如：主线路">
               </label>
               <label class="field">订阅 URL
-                <input id="homeSubscriptionUrl" placeholder="https://example.com/sub.yaml">
+                <input id="homeSubscriptionUrl" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴订阅 URL（含凭据，不对外展示）">
               </label>
               <div class="traffic-card">
                 <div class="traffic-main">
@@ -112,26 +129,47 @@
                 <button id="pickConfigBtn">选择离线 YAML</button>
                 <button id="removeOfflineYamlBtn" class="danger ghost" title="移除来源，保留原 YAML 文件；当前代理不重启">移除离线 YAML</button>
               </div>
+              <p class="notice">下载只更新本地缓存，不替换运行中通道；新配置在下次手动启动代理时生效。</p>
+            </section>
+            <section class="panel">
+              <div class="panel-head"><h2>更新记录</h2><span class="panel-badge">缓存 ≠ 运行配置</span></div>
+              <p id="subscriptionScheduleHint" class="notice"></p>
+              <div id="subscriptionRefreshDetails" aria-live="polite"></div>
             </section>
           </div>
         </section>
 
         <section id="view-proxy-nodes" class="view">
-          <div class="toolbar">
-            <div>
-              <h2>节点</h2>
-              <span id="nodeScoreSummary">按订阅分组 · 固定模型比较 · 不切节点</span>
-            </div>
+          <header class="page-head"><div><span class="eyebrow">ROUTES</span><h1>节点工作台</h1><p>网络连通与模型服务分开判断，测试不改变当前连接。</p></div><button id="testNetworkBtn" class="primary">一键网络测试</button></header>
+          <div class="probe-strip panel">
+            <p id="networkScoreSummary" role="status">HTTPS 连通与延迟 · 无需模型账户，订阅过期仍可测试</p>
             <div class="toolbar-actions">
-              <select id="probeProfile" aria-label="测速模型" title="整轮固定一个模型和账户；不同模型成绩不直接比较">
-                <option value="codex">Codex Spark · 主账户</option>
-                <option value="tokenmix">TokenMix · GPT-4o-mini</option>
-              </select>
-              <span class="latency-target" title="最多4路并发；逐节点初筛，前3名各补2次复测；请求会消耗所选账户额度。显示实际usage/端到端耗时及首正文TTFT；可取消，不切节点、不清连接">实际 tok/s · 候选3次复测</span>
-              <button id="testAllCodexBtn" class="primary soft">一键全测</button>
+              <label class="sr-only" for="nodeSearch">搜索节点或订阅</label><input id="nodeSearch" class="filter-input" placeholder="搜索节点或订阅…">
+              <select id="nodeFilter" aria-label="筛选节点"><option value="all">全部节点</option><option value="reachable">网络可达</option><option value="current">当前节点</option></select>
             </div>
           </div>
+          <details class="model-options panel">
+            <summary>模型测速 <span>可选 · 消耗账户额度 · 单次初筛，前 3 名各复测 2 次</span></summary>
+            <div class="toolbar-actions">
+              <select id="probeProfile" aria-label="测速账户"><option value="codex">Codex · 主账户</option><option value="tokenmix">TokenMix · GPT-4o-mini</option></select>
+              <label class="field">Codex 模型 <input id="benchmarkCodexModel" value="gpt-5.5" placeholder="填账户支持的模型 ID"></label>
+              <button id="testAllCodexBtn">模型全测</button>
+            </div>
+            <p id="nodeScoreSummary" role="status">实际 usage / 端到端耗时；不同模型成绩不直接比较。网络可达不代表账户支持此模型。</p>
+          </details>
+          <div class="node-column-head"><span>节点 / 订阅</span><span>网络延迟</span><span>模型速度</span><span>手动操作</span></div>
           <div id="nodeGroups" class="node-groups"></div>
+        </section>
+
+        <section id="view-core" class="view">
+          <header class="page-head"><div><span class="eyebrow">RUNTIME</span><h1>内核管理</h1><p>下载新版本，不动运行中的内核与连接。</p></div></header>
+          <section class="panel">
+            <div class="panel-head"><h2>sing-box</h2><span class="panel-badge">官方稳定版</span></div>
+            <p id="coreVersionStatus" class="status-card" role="status">尚未检查；点击检查更新查看本地与官方版本。</p>
+            <label class="field">下次启动使用的内核路径 <input id="singBoxPath" placeholder="默认使用内置 sing-box.exe"></label>
+            <div class="actions"><button id="pickCoreBtn">选择本地内核</button><button id="checkCoreBtn">检查更新</button><button id="downloadSingBoxBtn" class="primary">下载并校验更新</button></div>
+            <p class="notice">独立联网，优先官方资产 API；官方受限时使用 ghfast.top 镜像，仍须匹配官方大小与 SHA256。验证版本及现有配置兼容性。新内核保存到独立路径，失败保留旧版；成功后需下次手动启动代理才生效。</p>
+          </section>
         </section>
 
         <section id="view-connections" class="view">
@@ -178,8 +216,9 @@
         </section>
 
         <section id="view-settings" class="view">
+          <header class="page-head"><div><span class="eyebrow">PREFERENCES</span><h1>设置</h1><p>保存不会重启代理。端口、路由等配置下次启动生效。</p></div></header>
           <div class="settings-shell">
-            <section class="settings-section span">
+            <section class="settings-section span" hidden>
               <div class="section-title">
                 <h2>配置来源</h2>
                 <span id="coreBadge" class="panel-badge">sing-box</span>
@@ -189,20 +228,8 @@
                   <select id="subscriptionSelect" aria-label="选择订阅"></select>
                 </label>
                 <label class="field">订阅名称 <input id="subscriptionName" placeholder="例如：备用线路"></label>
-                <label class="field wide">订阅 URL <input id="subscriptionUrl" placeholder="https://example.com/sub.yaml"></label>
+                <label class="field wide">订阅 URL <input id="subscriptionUrl" type="password" placeholder="https://example.com/sub.yaml"></label>
                 <label class="field">离线 YAML（加入统一节点池） <input id="configPath" readonly placeholder="选择 Clash/Mihomo YAML"></label>
-              </div>
-            </section>
-
-            <section class="settings-section">
-              <div class="section-title"><h2>内核</h2></div>
-              <div class="settings-grid">
-                <label class="field wide">sing-box 路径 <input id="singBoxPath" placeholder="默认使用目录内 sing-box.exe"></label>
-                <div class="button-row">
-                  <button id="pickCoreBtn">选择内核</button>
-                  <button id="checkCoreBtn">检查更新</button>
-                  <button id="downloadSingBoxBtn">下载 sing-box</button>
-                </div>
               </div>
             </section>
 
@@ -251,7 +278,7 @@
                 </label>
                 <label class="check-row">
                   <input id="autoRecoverOnEndpointFailure" type="checkbox" checked>
-                  <span title="测速中某订阅 ≥25% 节点连接级失败，或缓存超过机场声明的刷新周期（Profile-Update-Interval，默认 24 小时）时，后台拉取新订阅、比对入口并直连探测新入口；只写缓存并提醒，不重启内核、不切换节点。系统 DNS 的 A/AAAA 诊断仍只作提示。需要立即应用请点「更新当前订阅」。"><b>订阅自动更新</b><small>测速证据或到期后台拉取 · 只写缓存并提醒 · 不重启内核</small></span>
+                  <span title="测速中某订阅 ≥25% 节点连接级失败，或缓存超过机场声明的刷新周期（Profile-Update-Interval，默认 24 小时）时，后台拉取新订阅、比对入口并直连探测新入口；只写缓存并提醒，不重启内核、不切换节点。系统 DNS 的 A/AAAA 诊断仍只作提示。新配置在下次手动启动代理时生效。"><b>订阅自动更新</b><small>测速证据或到期后台拉取 · 只写缓存并提醒 · 不重启内核</small></span>
                 </label>
               </div>
               <div class="table-wrap compact-table">
@@ -317,13 +344,13 @@
                 <label class="check-row"><input id="autoStartSilent" type="checkbox" checked> 开机自动静默启动</label>
                 <label class="check-row continuous-probe-row">
                   <input id="continuousWssAutoSwitchEnabled" type="checkbox">
-                  <span title="按上次榜单顺序循环更新 tok/s；持续测速只更新榜单，不切换节点。"><b>持续测速（不切节点）</b><small>手动分组/全量测速完成后才切到本轮最快节点</small></span>
+                  <span title="按上次榜单顺序循环更新 tok/s；持续测速只更新榜单，不切换节点。"><b>持续测速（不切节点）</b><small>仅更新成绩，所有测速均不自动切节点</small></span>
                 </label>
                 <label class="check-row probe-interval-row" title="每轮全量测速结束后等待的时间；0 = 不间歇连续测。修改即时生效。">
                   <span><b>测速间隔（分钟）</b><small>0 = 连续</small></span>
                   <input id="continuousProbeIntervalMinutes" type="number" min="0" max="1440" step="1" class="interval-input">
                 </label>
-                <label class="field" title="测速第一步的可达性检测请求地址；留空 = Anthropic Messages API（https://api.anthropic.com/v1/messages）">可达检测网址
+                <label class="field" hidden title="旧版 Anthropic 探测已停用，保留配置兼容性">旧版检测网址
                   <input id="probeGateUrl" type="text" placeholder="留空 = Anthropic API">
                 </label>
                 <label class="field">核心日志级别
@@ -360,6 +387,7 @@
           "/vendor/js-yaml.min.js",
           "/js/config-helpers.js",
           "/js/site-failover.js",
+          "/js/network-probe.js",
           "/js/main.js"
         ];
         (function next(i) {
@@ -367,7 +395,7 @@
           var s = document.createElement("script");
           s.src = files[i] + "?r=" + stamp;
           s.onload = function () { next(i + 1); };
-          s.onerror = function () { next(i + 1); };
+          s.onerror = function () { console.error("Required application script failed:", files[i]); document.getElementById("heroMeta").textContent = "界面组件加载失败：" + files[i] + "；请重载界面"; };
           document.head.appendChild(s);
         })(0);
       })();

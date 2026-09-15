@@ -11,7 +11,7 @@ const readline = require("node:readline");
 const { performance } = require("node:perf_hooks");
 const helpers = require("../js/config-helpers.js");
 
-const CODEX_MODEL = "gpt-5.3-codex-spark";
+const CODEX_MODEL = "gpt-5.5";
 const TOKENMIX_MODEL = "gpt-4o-mini";
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const TOKENMIX_URL = "https://api.tokenmix.ai/v1/chat/completions";
@@ -96,8 +96,9 @@ function probeFailure(scope, error, extra = {}) {
   return { ...extra, ok: false, failureScope: ["node", "model", "local", "round", "cancelled", "measurement"].includes(scope) ? scope : "round", error: String(error?.message || error || "Probe failed").slice(0, 400) };
 }
 function codexChannelFailure(http, detail) {
+  // Distinguish an explicit account/model rejection from a generic intermediary response.
   return [401, 402, 429].includes(http) || http >= 500
-    || /model.*(?:not found|unavailable|unsupported)|unsupported (?:parameter|value)|auth(?:entication)?|unauthorized|subscription|quota|rate.?limit|usage.?limit/i.test(String(detail || ""));
+    || /model.*(?:not found|unavailable|unsupported|not supported)|unsupported (?:parameter|value)|auth(?:entication)?|unauthorized|subscription|quota|rate.?limit|usage.?limit/i.test(String(detail || ""));
 }
 function modelMatches(actual, requested) { return actual === requested || (actual.startsWith(requested + "-") && /^\d{4}-\d{2}-\d{2}$/.test(actual.slice(requested.length + 1))); }
 function createStreamParser(profile, clock = () => performance.now()) {
@@ -204,10 +205,10 @@ async function runStreamProbe(port, options) {
       const parsed = parser.result();
       let detail = parsed.error || stderr.trim().split(/\r?\n/)[0] || "HTTP " + http;
       if (http !== 200) {
-        try { const json = JSON.parse(stdout.replace(/\nT\s+[\s\S]*$/, "")); detail = json.error?.message || detail; } catch { /* Non-JSON errors retain HTTP/curl evidence. */ }
+        try { const json = JSON.parse(stdout.replace(/\nT\s+[\s\S]*$/, "")); detail = json.error?.message || (typeof json.detail === "string" ? json.detail : "") || json.message || detail; } catch { /* Non-JSON errors retain HTTP/curl evidence. */ }
       }
-      if (code !== 0 || !http) { finish(probeFailure("node", safe(detail || "curl exit " + code), { http, exitCode: code, transient: true })); return; }
-      if (http !== 200 || parsed.error) { finish(probeFailure(codexChannelFailure(http, detail) ? "model" : "node", safe(detail), { http })); return; }
+      if (code !== 0 || !http) { finish(probeFailure([2, 3, 4, 26, 27, 48, 60, 77].includes(code) ? "local" : "node", safe(detail || "curl exit " + code), { http, exitCode: code, transient: true })); return; }
+      if (http !== 200 || parsed.error) { finish(probeFailure(codexChannelFailure(http, detail) ? "model" : [400, 404, 422].includes(http) ? "measurement" : "node", safe(detail), { http })); return; }
       if (!parsed.completed || parsed.characters < 40 || parsed.firstAt === null) { finish(probeFailure("measurement", "SSE incomplete or no usable text", { http })); return; }
       if (!modelMatches(parsed.resolvedModel, requestedModel)) { finish(probeFailure("model", "Requested " + requestedModel + "; received " + parsed.resolvedModel, { http })); return; }
       if (!(parsed.tokens > 0)) { finish(probeFailure("measurement", "完整响应缺少实际 usage；不估算 token 数、不参与排名", { http, reachable: true })); return; }
@@ -319,7 +320,10 @@ async function runRound(options) {
       const controls = failed.slice(0, 3); total += controls.length; let recovered = 0;
       for (const port of controls) { if (signal.aborted || channelError) break; const value = await measure(port, "control"); if (value.ok) recovered++; }
       if (!recovered && !signal.aborted) {
-        for (const port of failed) outcomes.set(port, probeFailure("round", "大面积失败且低并发对照未恢复；本轮环境/服务异常，不能判定全部节点失效", { profileKey, roundId }));
+        for (const port of failed) {
+          const original = outcomes.get(port);
+          outcomes.set(port, probeFailure("round", "大面积失败且低并发对照未恢复；不能判定全部节点失效。原始错误：" + original.error, { profileKey, roundId, http: original.http, exitCode: original.exitCode }));
+        }
         note("Control recheck did not recover; retaining prior successes, no all-nodes-dead verdict");
       } else if (!signal.aborted && !channelError) {
         note("Serial control recovered; rechecking remaining failed routes with concurrency=1");

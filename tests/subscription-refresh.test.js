@@ -132,7 +132,7 @@ test("benchmark evidence refreshes only the stale subscription; changed reachabl
   const pending = a.run("state.pendingConfigApply");
   assert.equal(pending.profileId, "sub-a"); assert.equal(pending.added, 2); assert.equal(pending.reachable, 2); assert.equal(pending.notified, true);
   assert.equal(a.notifications.length, 1); assert.match(a.notifications[0].body, /lovenao/);
-  assert.match(a.elements.get("subscriptionStatus").textContent, /更新当前订阅/);
+  assert.match(a.elements.get("subscriptionStatus").textContent, /待下次手动启动代理生效/);
   assert.ok(a.logs.some(l => /node-level failures this round/.test(l)));
   assert.ok(a.logs.some(l => /entry endpoints changed \+2\/-2; new entries reachable 2\/2/.test(l)));
   assert.ok(a.logs.some(l => /running core unchanged/.test(l)));
@@ -176,7 +176,7 @@ test("disabled switch, cooldown, busy state and download failure all log a reaso
   assert.equal(a.notifications.length, 0);
 });
 
-test("unchanged upstream refreshes cache silently; unreachable new entries never raise a reminder", async () => {
+test("unchanged upstream refreshes cache silently; changed unverified entries remain visibly staged",  async () => {
   const a = app({ live: OLD }); a.seed("sub-a", OLD, 0, "HTTP/1.1 200 OK\r\nSubscription-Userinfo: old\r\n");
   const same = await a.run("stageSubscriptionRefresh(state.settings.subscriptions[0], 'scheduled', 'cache age 30h >= interval 24h')");
   assert.equal(same.diff.changed, false);
@@ -188,10 +188,33 @@ test("unchanged upstream refreshes cache silently; unreachable new entries never
   const b = app({ reachable: () => false }); b.seed("sub-a", OLD);
   const dead = await b.run("stageSubscriptionRefresh(state.settings.subscriptions[0], 'benchmark', '4/4')");
   assert.equal(dead.diff.changed, true); assert.equal(dead.reachable.length, 0); assert.equal(dead.unreachable.length, 2);
-  assert.equal(b.run("state.pendingConfigApply"), null);
-  assert.equal(b.notifications.length, 0);
-  assert.ok(b.logs.some(l => /new entries unreachable from this machine; cache updated, no apply reminder issued/.test(l)));
+  assert.equal(b.run("state.pendingConfigApply").reachable, 0);
+  assert.equal(b.notifications.length, 1);
+  assert.match(b.notifications[0].body, /已验证连通 0/);
+  assert.ok(b.logs.some(l => /new entries not verified; cache staged, reachability is advisory only/.test(l)));
   assert.equal(b.files.get("W/subscription.sub-a.yaml"), NEW);
+});
+
+test("failed scheduled downloads retry after cooldown, not after another full subscription interval", async () => {
+  const a = app({ downloadFails: true }); a.seed("sub-a", OLD, 30 * 3600000); a.seed("sub-b", NEW);
+  await a.run("subscriptionScheduledRefreshTick()");
+  const first = a.commands.length;
+  a.clock.advance(21 * 60000);
+  await a.run("subscriptionScheduledRefreshTick()");
+  assert.equal(a.commands.length, first + 1);
+  assert.equal(a.files.get("W/subscription.sub-a.yaml"), OLD);
+  assert.match(a.run("state.settings.subscriptionRefreshStatus['sub-a'].error"), /下载失败/);
+});
+
+test("same endpoint but changed credential is staged, and never-started subscriptions are downloaded", async () => {
+  const changed = JSON.parse(OLD); changed.proxies[0].password = 'fixture-new-password';
+  const a = app({ live: JSON.stringify(changed) }); a.seed('sub-a', OLD);
+  const outcome = await a.run("stageSubscriptionRefresh(state.settings.subscriptions[0], 'scheduled')");
+  assert.equal(outcome.diff.changed, false); assert.equal(outcome.contentChanged, true);
+  assert.equal(a.run("state.settings.subscriptionRefreshStatus['sub-a'].pending"), true);
+  const b = app(); b.seed('sub-b', NEW);
+  const outcomes = await b.run('subscriptionScheduledRefreshTick()');
+  assert.equal(outcomes.length, 1); assert.equal(outcomes[0].profileId, 'sub-a');
 });
 
 test("TCP probe targets distinct new hosts first, at most three, through a hidden PowerShell TcpClient", async () => {
@@ -220,9 +243,9 @@ test("scheduled tick honours Profile-Update-Interval and cache age; disabled swi
   const again = await a.run("subscriptionScheduledRefreshTick()");
   assert.equal(again.length, 0, "fresh cache mtime stops repeated refreshes");
   a.run("startSubscriptionRefreshScheduler(); startSubscriptionRefreshScheduler();");
-  const armed = [...a.timers.values()].filter(t => t.ms === 30 * 60 * 1000 && t.interval);
+  const armed = [...a.timers.values()].filter(t => t.ms === 60 * 1000 && t.interval);
   assert.equal(armed.length, 1, "one interval timer even when started twice");
-  assert.ok([...a.timers.values()].some(t => t.ms === 5 * 60 * 1000 && !t.interval), "first tick after five minutes");
+  assert.ok([...a.timers.values()].some(t => t.ms === 15 * 1000 && !t.interval), "first tick after fifteen seconds");
 });
 
 test("auto-refresh code paths never restart the core, switch nodes or rebuild the running pool; DNS stays advisory", () => {
