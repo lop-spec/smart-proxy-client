@@ -86,7 +86,7 @@ function appFixture(){
   const paths=[],logs=[];let selected="bad";
   const context=vm.createContext({window:{__SMART_PROXY_TEST__:true},console,Map,Set,Date,Promise,JSON,Math,Array,Object,URL,AbortController,TextEncoder,performance,
     SmartProxyConfig:require("../resources/js/config-helpers.js"),SmartProxySiteFailover:guardApi,setTimeout,clearTimeout,setInterval,clearInterval,
-    document:{getElementById:()=>({textContent:"",classList:{toggle(){}}})},Neutralino:{}});
+    document:{getElementById:()=>({textContent:"",dataset:{},setAttribute(){},classList:{toggle(){}}})},Neutralino:{}});
   vm.runInContext(source,context);context.messages=logs;
   vm.runInContext(`state.settings.siteFailoverEnabled=true;state.settings.siteFailoverTargets='chatgpt.com';state.mainProcess={};state.mainCoreReady=true;
     log=s=>messages.push(s);renderProxyNodes=()=>{};`,context);
