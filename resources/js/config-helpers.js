@@ -828,8 +828,8 @@
 
   function successfulCodexProbeResult(value) {
     if (value?.metricKind === "stream-quality-v1") return value.status === "done" && value.ok === true
-      && value.stream?.ok === true && value.download?.ok === true
-      && Number.isFinite(value.download.mbps) && value.download.mbps > 0
+      && value.stream?.ok === true
+      && (value.measurement === "sse-only" || value.download?.ok === true && Number.isFinite(value.download.mbps) && value.download.mbps > 0)
       && ["firstSampleMs", "jitterMs", "maxExtraGapMs", "burstRatio"].every(key => Number.isFinite(value.stream[key]) && value.stream[key] >= 0)
       && !!value.profileKey;
     const requestedModel = String(value && value.requestedModel || "");
@@ -856,14 +856,17 @@
     const number = (key) => Math.max(0, Number(value[key]) || 0);
     if (value.metricKind === "stream-quality-v1") {
       const numeric = (object, keys) => Object.fromEntries(keys.map(key => [key, Math.max(0, Number(object?.[key]) || 0)]));
-      return { metricKind: "stream-quality-v1", ok: true, status: "done", node: String(value.node || "").slice(0, 500),
+      return { metricKind: "stream-quality-v1", measurement: value.measurement === "sse-only" ? "sse-only" : "sse-and-download", ok: true, status: "done", node: String(value.node || "").slice(0, 500),
         endpoint: String(value.endpoint || "").slice(0, 500), location: String(value.location || "").slice(0, 100),
         profileKey: String(value.profileKey || "").slice(0, 800), roundId: String(value.roundId || ""),
         measuredAt: number("measuredAt"), sampleCount: number("sampleCount"), successfulSamples: number("successfulSamples"),
         successRate: number("successRate"), verified: value.verified === true, lastAttempt,
         routeVerification: "isolated-node-lane", gateSkipped: true, anthropicOk: null,
         stream: { ...numeric(value.stream, ["firstSampleMs", "deliveryMs", "jitterMs", "p95ExtraGapMs", "maxExtraGapMs", "longestGapMs", "stallCount", "tailGrowthMs", "burstRatio", "sourceSlipMs", "receivedSamples", "streamBytes"]), ok: true, flowPass: value.stream.flowPass === true },
-        download: { ...numeric(value.download, ["bytes", "elapsedMs", "transferMs", "mbps", "endToEndMbps"]), ok: true, shortSample: value.download.shortSample === true },
+        ...(value.measurement === "sse-only" ? {} : { download: { ...numeric(value.download, ["bytes", "elapsedMs", "transferMs", "mbps", "endToEndMbps"]), ok: true, shortSample: value.download.shortSample === true } }),
+        ...(value.measurement === "sse-only" && value.legacyDownloadResult?.metricKind === "stream-quality-v1"
+          && value.legacyDownloadResult.measurement !== "sse-only" && successfulCodexProbeResult(value.legacyDownloadResult)
+          ? { legacyDownloadResult: normalizeCodexProbeResult(value.legacyDownloadResult) } : {}),
         samples: Array.isArray(value.samples) ? value.samples.slice(-3) : [] };
     }
     return {
@@ -928,7 +931,10 @@
     if (!candidate) return prior;
     if (candidate.status === "pending" || candidate.gateOnly) return prior || { status: "pending" };
     if (successfulCodexProbeResult(candidate)) {
-      return { ...candidate, status: "done", lastAttempt: { status: "done", at: Number(candidate.measuredAt || Date.now()), roundId: candidate.roundId || "" } };
+      const legacy = prior?.metricKind === "stream-quality-v1" && prior.measurement !== "sse-only" ? prior : prior?.legacyDownloadResult;
+      const archive = candidate.measurement === "sse-only" && successfulCodexProbeResult(legacy)
+        ? { legacyDownloadResult: normalizeCodexProbeResult(legacy) } : {};
+      return { ...candidate, ...archive, status: "done", lastAttempt: { status: "done", at: Number(candidate.measuredAt || Date.now()), roundId: candidate.roundId || "" } };
     }
     const lastAttempt = { status: candidate.status || "unknown", failureScope: candidate.failureScope || "round",
       error: String(candidate.error || ""), at: Date.now(), roundId: candidate.roundId || "" };
