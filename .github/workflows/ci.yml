@@ -75,7 +75,7 @@ jobs:
           node scripts/prepare-native-ui-audit.cjs $stage
           if ($LASTEXITCODE -ne 0) { throw 'Native fixture staging failed; no UI acceptance is claimed' }
           $manifest = Get-Content (Join-Path $stage 'manifest.json') -Raw | ConvertFrom-Json
-          $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ('"' + (Join-Path $PWD 'scripts/run-native-ui-audit.ps1') + '"'), '-Stage', ('"' + $stage + '"'), '-ExpectedExeSha256', $manifest.exeSha256)
+          $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ('"' + (Join-Path $PWD 'scripts/run-native-ui-audit.ps1') + '"'), '-Stage', ('"' + $stage + '"'), '-ExpectedExeSha256', $manifest.exeSha256, '-CaptureControllerFailure')
           $helper = Start-Process -FilePath "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput "$stage/output/helper.stdout.log" -RedirectStandardError "$stage/output/helper.stderr.log"
           if (-not $helper.WaitForExit(180000)) {
             $helper.Kill($true)

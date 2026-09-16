@@ -7,6 +7,7 @@ function validateNativeReport({host,audit},dpi){
  assert.ok([96,120,144,168].includes(dpi),'Unexpected target DPI');
  for(const key of ['ok','helperStationUnchanged','threadDpiRestored'])assert.equal(host[key],true,key);
  for(const key of ['switchDesktopCalled','systemSettingsChanged'])assert.equal(host[key],false,key);
+ assert.notEqual(host.diagnosticOnly,true,'A debugger diagnostic cannot count as native UI acceptance');
  assert.equal(host.ownedProcessesRemaining,0,'Owned native processes remain');
  const windows=host.windows.filter(w=>w.width>0&&w.height>0);assert.ok(windows.length,'No real native window');assert.deepEqual([...new Set(windows.map(w=>w.dpi))],[dpi],'Real window DPI mismatch');
  assert.equal(audit.fixtureOnly,true);assert.equal(audit.productionInstalled,false);assert.deepEqual(audit.failures,[]);assert.deepEqual(audit.externalResourceUrls,[]);

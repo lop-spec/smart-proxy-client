@@ -7,7 +7,7 @@ test('native matrix requires all 70 unique cases and exact real DPI/DPR',()=>{
  for(const mutate of [s=>s.audit.rows.pop(),s=>s.audit.rows[1]={...s.audit.rows[0]},s=>s.audit.rows[0].dpr=1.25,s=>s.host.windows[0].dpi=120,s=>s.host.windows=[],s=>s.audit.rows.forEach(r=>r.viewport={width:1040,height:680})]){const s=sample();mutate(s);assert.throws(()=>validateNativeReport(s,96))}
 });
 test('native gate preserves font/layout/errors, isolation, process cleanup and screenshots requirements',()=>{
- for(const mutate of [s=>s.audit.rows[0].fontLoaded=false,s=>s.audit.rows[0].overflow.push({}),s=>s.audit.rows[0].errors.push('error'),s=>s.audit.rows[0].nav[0].reachable=false,s=>s.audit.rows[0].scrollReset=false,s=>s.audit.externalResourceUrls.push('https://example.com'),s=>s.host.ownedProcessesRemaining=1,s=>s.host.switchDesktopCalled=true,s=>s.host.systemSettingsChanged=true,s=>s.host.threadDpiRestored=false,s=>s.audit.screenshots=[]]){const s=sample();mutate(s);assert.throws(()=>validateNativeReport(s,96))}
+ for(const mutate of [s=>s.audit.rows[0].fontLoaded=false,s=>s.audit.rows[0].overflow.push({}),s=>s.audit.rows[0].errors.push('error'),s=>s.audit.rows[0].nav[0].reachable=false,s=>s.audit.rows[0].scrollReset=false,s=>s.audit.externalResourceUrls.push('https://example.com'),s=>s.host.ownedProcessesRemaining=1,s=>s.host.switchDesktopCalled=true,s=>s.host.systemSettingsChanged=true,s=>s.host.threadDpiRestored=false,s=>s.host.diagnosticOnly=true,s=>s.audit.screenshots=[]]){const s=sample();mutate(s);assert.throws(()=>validateNativeReport(s,96))}
 });
 test('startup graph keeps stream-quality and refuses unexpected loading order',()=>{
  const {startupFiles}=require('../scripts/prepare-native-ui-audit.cjs');
