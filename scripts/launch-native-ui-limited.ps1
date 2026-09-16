@@ -25,6 +25,11 @@ if($Mode -eq 'Task'){
  }catch{$record.error=$_.Exception.Message;Write-Warning $record.error}finally{Json 'limited-task.json' $record}
  exit $record.exitCode
 }
+if($ExpectedSid.EndsWith('-500')){
+ Write-Warning 'Built-in Administrator ignores Task Scheduler Limited run level; the known-failing task path will not be repeated'
+ & (Join-Path $PSScriptRoot 'read-native-lua-token.ps1') -OutputFile (Join-Path $Stage 'output/lua-token-capability.json')
+ throw 'Built-in Administrator: capability recorded only; no native UI acceptance or launch attempted'
+}
 $service=New-Object -ComObject Schedule.Service;$service.Connect();$folder=$service.GetFolder('\')
 $name='SmartProxy-Native-'+[guid]::NewGuid().ToString('N');$registered=$null;$export=$null
 $cleanup=@{name=$name;removed=$false;exportVerified=$false;timedOut=$false;noSettingsChanged=$true}
