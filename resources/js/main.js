@@ -3,7 +3,7 @@ const MAIN_CONTROLLER_TIMEOUT_MS = 8000;
 const MAIN_CORE_START_ATTEMPTS = 3;
 const MAIN_CORE_RETRY_DELAY_MS = 450;
 const APP_CONFIG_VERSION = 17;
-const APP_BUILD_ID = "2026-09-16-atelier-probe-exit";
+const APP_BUILD_ID = "2026-09-16-atelier-short-viewport";
 const LOG_MAX_FILE_BYTES = 8 * 1024 * 1024;
 const LOG_MAX_BUFFER_BYTES = 256 * 1024;
 const LOG_FLUSH_MS = 500;
@@ -5401,6 +5401,7 @@ function stopConnectionPolling() {
 }
 
 function switchView(view) {
+  const changed = state.currentView !== view;
   state.currentView = view;
   document.querySelectorAll(".nav").forEach((el) => el.classList.toggle("active", el.dataset.view === view));
   document.querySelectorAll(".view").forEach((el) => el.classList.toggle("active", el.id === `view-${view}`));
@@ -5409,6 +5410,9 @@ function switchView(view) {
   if (view === "proxy-nodes") renderProxyNodes();
   if (view === "home") renderAtelierOverview();
   document.querySelectorAll('.nav-list .nav').forEach(el => { if (el.dataset.view === view) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current'); });
+  // Different views must not inherit a previous page's document scroll offset.
+  // Keep same-view refreshes in place; never move focus or change proxy state.
+  if (changed) window.scrollTo?.({ top: 0, left: 0, behavior: 'instant' });
 }
 
 function renderCustomRules() {

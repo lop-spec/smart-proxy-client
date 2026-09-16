@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Smart Proxy Client</title>
     <link rel="icon" href="/icons/appIcon.png">
-    <link rel="stylesheet" href="/styles.css?v=2026-09-16-atelier-1">
+    <link rel="stylesheet" href="/styles.css?v=2026-09-16-atelier-short-viewport">
   </head>
   <body>
     <a class="skip-link" href="#main-content">跳到主内容</a>
@@ -134,6 +134,7 @@
             </div>
           </div>
           <div class="atelier-node-workspace">
+          <div id="nodeGroups" class="node-groups" aria-label="缓存节点列表"></div>
           <details class="model-options panel" open>
             <summary>质量测试 <span>Stream Quality / SSE + 下载</span></summary>
             <div class="atelier-current-detail"><span>当前选择</span><strong id="atelierDetailNode">尚未选择节点</strong><dl><div><dt>HTTPS 延迟</dt><dd id="atelierDetailLatency">—</dd></div><div><dt>首段等待</dt><dd id="atelierDetailFirst">—</dd></div><div><dt>额外停顿</dt><dd id="atelierDetailGap">—</dd></div></dl><small id="atelierDetailHistory">当前节点还没有 SSE 成绩</small></div>
@@ -146,7 +147,6 @@
             <div id="phonePairing" hidden><label class="field">本机执行层 <input id="phoneLocalUrl" readonly></label><label class="field">本次配对码 <input id="phonePairCode" type="password" readonly autocomplete="off"></label><button id="copyPhonePairCode">复制配对码</button><p>手机打开 https://lop-spec.github.io/stream-quality/，填入此电脑的私人 HTTPS 地址与配对码。地址可由 Tailscale Serve 等提供；手机不能使用电脑的 127.0.0.1。手机控制期间暂停本地测速，不影响日常代理。停止控制将取消实际任务、关闭独立核心并使配对码失效。</p></div>
             <p id="nodeScoreSummary" role="status">旧模型成绩原样保留在历史数据中，不参与新榜单。</p>
           </details>
-          <div id="nodeGroups" class="node-groups" aria-label="缓存节点列表"></div>
           </div>
         </section>
 
