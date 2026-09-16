@@ -20,6 +20,30 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Read native display capability (not UI acceptance)
+        timeout-minutes: 1
+        shell: pwsh
+        run: |
+          $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ('"' + (Join-Path $PWD 'scripts/read-native-display-capability.ps1') + '"'), '-OutputPath', ('"' + (Join-Path $PWD 'native-display-capability.json') + '"'))
+          $probe = Start-Process -FilePath "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput native-display-capability.log -RedirectStandardError native-display-capability.stderr.log
+          if (-not $probe.WaitForExit(45000)) {
+            $probe.Kill($true)
+            $probe.WaitForExit(5000) | Out-Null
+            throw 'Owned capability probe exceeded 45 seconds; no UI acceptance is claimed'
+          }
+          Get-Content native-display-capability.log, native-display-capability.stderr.log
+          if ($probe.ExitCode -ne 0) { throw "Capability collection failed: $($probe.ExitCode)" }
+      - name: Retain native display capability
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-display-capability-${{ github.sha }}
+          path: |
+            native-display-capability.json
+            native-display-capability.log
+            native-display-capability.stderr.log
+          if-no-files-found: error
+          retention-days: 7
       - name: Set up Node.js
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
