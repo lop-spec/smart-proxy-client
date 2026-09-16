@@ -3,7 +3,7 @@ const MAIN_CONTROLLER_TIMEOUT_MS = 8000;
 const MAIN_CORE_START_ATTEMPTS = 3;
 const MAIN_CORE_RETRY_DELAY_MS = 450;
 const APP_CONFIG_VERSION = 17;
-const APP_BUILD_ID = "2026-09-15-stream-quality-v1.4.0";
+const APP_BUILD_ID = "2026-09-16-atelier-ui";
 const LOG_MAX_FILE_BYTES = 8 * 1024 * 1024;
 const LOG_MAX_BUFFER_BYTES = 256 * 1024;
 const LOG_FLUSH_MS = 500;
@@ -584,6 +584,53 @@ function getSwitchableNodes(allNodes = getCandidateNodes()) {
   return allNodes;
 }
 
+// Presentation only: reads current state, never changes routes, settings or probe results.
+function atelierSummary(input) {
+  const entries = input.subscriptionNodeCatalog || [];
+  const current = entries.find(item => (item.tag || item.node) === input.currentNode);
+  const node = current?.node || (input.currentNode && input.currentNode !== "-" ? input.currentNode : "");
+  const meta = node && SmartProxyConfig.nodeDisplayMeta ? SmartProxyConfig.nodeDisplayMeta(node) : { icon: "SP", region: "节点" };
+  const regions = { HK: "Hong Kong", TW: "Taiwan", JP: "Japan", SG: "Singapore", US: "United States", KR: "South Korea", UK: "United Kingdom", DE: "Germany", FR: "France" };
+  const result = current ? input.nodeCodexResults?.get(current.key) : null;
+  const valid = result?.metricKind === "stream-quality-v1" && SmartProxyConfig.successfulCodexProbeResult(result);
+  const pending = !!current && input.codexProbePendingKeys?.has(current.key);
+  const last = result?.lastAttempt;
+  const stale = last && last.status !== "done";
+  const failedLabel = last?.status === "cancelled" ? "已停止" : "本次未通过";
+  const qualityState = pending ? (valid ? "测试中 · 历史" : "测试中") : stale ? (valid ? "历史 · " : "") + failedLabel : valid ? (result.stream.flowPass ? "流式达标" : "存在波动") : "未测试";
+  const qualityMeta = valid ? `${stale || pending ? "上次成功 · " : "最近测于 "}${new Date(result.measuredAt).toLocaleString("zh-CN")} · ${result.verified ? "复测" : "初筛 / 未验证"}` : "当前节点还没有 SSE 成绩";
+  const ms = n => typeof n === "number" && Number.isFinite(n) && n >= 0 ? `${Math.round(n)} ms` : "—";
+  const network = current ? input.settings.networkProbeStore?.[current.key] : null;
+  const latency = network?.status === "done" ? ms(network.delayMs) : network?.lastSuccess ? `${ms(network.lastSuccess.delayMs)} · 历史` : network?.failureScope === "local" ? "待载入" : network ? "暂无成功成绩" : "未测试";
+  const sourceMap = new Map((input.settings.subscriptions || []).map(sub => [sub.id, { name: sub.name || "未命名订阅", count: 0 }]));
+  for (const item of entries) {
+    const ids = item.subscriptionIds?.length ? item.subscriptionIds : [item.subscriptionId];
+    for (const id of new Set(ids)) {
+      if (!sourceMap.has(id)) sourceMap.set(id, { name: item.subscriptionName || "离线来源", count: 0 });
+      sourceMap.get(id).count++;
+    }
+  }
+  return { node: node || "尚未选择节点", region: node ? regions[meta.icon] || "Your connection" : "Your connection", monogram: node ? meta.icon : "SP",
+    source: current ? (current.subscriptionNames || [current.subscriptionName]).filter(Boolean).join(" / ") : node ? "已选节点" : "从缓存中选择一条线路",
+    jitter: valid && Number.isFinite(result.stream.jitterMs) ? String(Math.round(result.stream.jitterMs)) : "—", latency,
+    first: valid ? ms(result.stream.firstSampleMs) : "—", gap: valid ? ms(result.stream.maxExtraGapMs) : "—",
+    qualityState, qualityMeta, sources: [...sourceMap.values()], count: entries.length };
+}
+
+function renderAtelierOverview() {
+  if (!$('atelierRegion')) return;
+  const view = atelierSummary(state);
+  const values = { atelierRegion: view.region, atelierMonogram: view.monogram, atelierSource: view.source,
+    atelierLatency: view.latency, atelierJitter: view.jitter, atelierQualityState: view.qualityState,
+    atelierQualityMeta: view.qualityMeta, atelierCacheCount: `${view.count} 个节点`, atelierDetailNode: view.node,
+    atelierDetailLatency: view.latency, atelierDetailFirst: view.first, atelierDetailGap: view.gap, atelierDetailHistory: view.qualityMeta };
+  for (const [id, value] of Object.entries(values)) if ($(id)) $(id).textContent = value;
+  if ($('homeNode')) { $('homeNode').textContent = view.node; $('homeNode').title = view.node; }
+  if ($('homeMode')) $('homeMode').textContent = state.settings.globalProxyEnabled ? "全局代理" : "自定义规则";
+  const sources = $('atelierSources');
+  if (sources) sources.innerHTML = view.sources.length ? view.sources.slice(0, 3).map((sub, i) => `<div class="source-item"><span class="source-symbol" aria-hidden="true">${String(i + 1).padStart(2, '0')}</span><div><strong>${escapeHtml(sub.name)}</strong><small>${sub.count} 个缓存节点</small></div></div>`).join('') + (view.sources.length > 3 ? `<small class="more-sources">另有 ${view.sources.length - 3} 个来源</small>` : '') : '<p class="notice">尚未添加订阅<br>也可以导入离线 YAML</p>';
+}
+
 function setStatus() {
   const on = !!state.mainProcess && !!state.mainCoreReady;
   const core = currentCoreLabel();
@@ -594,6 +641,7 @@ function setStatus() {
   $("sideStatus").textContent = on ? "代理运行中" : "未启动";
   $("hero").className = `hero ${on ? "on" : "off"}`;
   $("heroTitle").textContent = on ? "代理运行中" : "代理未启动";
+  $("heroTitle").className = `connection-state ${on ? "on" : "off"}`;
   $("heroMeta").textContent = on
     ? `${core} / ${routeMode} / 节点 ${allNodes.length}`
     : `当前核心 ${core}${corePath ? " / 路径已设置" : " / 路径未设置"}`;
@@ -608,6 +656,7 @@ function setStatus() {
     : visibleNodeCount ? `已缓存 ${visibleNodeCount} 个节点` : "未获取节点";
   updateHomeProxyControls();
   renderHomeTraffic();
+  renderAtelierOverview();
 }
 
 function normalizeSubscriptionSettings() {
@@ -3360,6 +3409,7 @@ async function updateCurrentNode() {
 }
 
 function updateHomeNodeGroup() {
+  renderAtelierOverview();
   const box = $("homeNodeGroup");
   if (!box) return;
   const entry = state.subscriptionNodeCatalog.find((item) => (item.tag || item.node) === state.currentNode);
@@ -5062,7 +5112,6 @@ function networkMetric(entry) {
 }
 
 function renderProxyNodes() {
-  if (state.currentView !== "proxy-nodes") return;
   if ((state.codexProbeRunning || state.networkProbeJob) && !state.proxyRenderFlushing) {
     if (!state.proxyRenderTimer) {
       state.proxyRenderTimer = setTimeout(() => {
@@ -5074,6 +5123,8 @@ function renderProxyNodes() {
     }
     return;
   }
+  renderAtelierOverview();
+  if (state.currentView !== "proxy-nodes") return;
   const box = $("nodeGroups");
   if (!box) return;
   const active = activeSubscription();
@@ -5150,22 +5201,16 @@ function renderProxyNodes() {
         const network = networkMetric(entry);
         const tag = current ? "当前" : prepared ? "已准备" : fastest ? "本轮候选" : "";
         return `
-          <div tabindex="0" role="button" aria-label="选择 ${escapeHtml(entry.node)}" class="node-row ${current || prepared ? "current" : ""} ${result && result.anthropicOk === false ? "blocked" : ""}" data-select-node="${escapeHtml(entry.node)}" data-node-key="${escapeHtml(entry.key)}" title="${escapeHtml(`${entry.subscriptionName} / ${entry.node}`)}&#10;${escapeHtml(codex.title)}">
-            <span class="node-dot ${dot}"></span>
-            <span class="node-group-chip${groupCooldownActive(classifyNodeGroup(entry).id) ? " cooling" : ""}${current ? " current" : ""}" title="分组 ${escapeHtml(classifyNodeGroup(entry).label)}${groupCooldownActive(classifyNodeGroup(entry).id) ? "（抖动冷却中）" : ""}${current ? " · 当前所在组" : ""}">${escapeHtml(classifyNodeGroup(entry).id)}</span>
-            <span class="node-ico">${escapeHtml(meta.icon)}</span>
-            <span class="node-label">${escapeHtml(meta.shortName)}</span>
-            <span class="network-metric ${network.css}" title="${escapeHtml(network.title)}">${escapeHtml(network.text)}</span>
-            <span class="node-metric ${metricClass}" title="流式质量 / 下载：${escapeHtml(codex.title)}">${escapeHtml(metric)}</span>
-            <span class="node-tag ${fastest && !current ? "gold" : ""}">${escapeHtml(tag)}</span>
-            <button class="node-network" data-network-probe-key="${escapeHtml(entry.key)}" title="测试网络连通性与延迟" ${state.codexProbeRunning || state.networkProbeJob ? "disabled" : ""}>网络</button>
-            <button class="node-retest" data-codex-probe-key="${escapeHtml(entry.key)}" title="固定流式 + 8 MiB 下载，不调用模型" ${state.networkProbeJob || state.codexProbeRunning && state.codexProbeBusyKey !== entry.key ? "disabled" : ""}>质量</button>
-          </div>`;
+          <article class="node-row ${current || prepared ? "current" : ""} ${result && result.anthropicOk === false ? "blocked" : ""}" data-select-node="${escapeHtml(entry.node)}" data-node-key="${escapeHtml(entry.key)}" title="${escapeHtml(`${entry.subscriptionName} / ${entry.node}`)}&#10;${escapeHtml(codex.title)}">
+            <button class="node-select node-identity" data-select-node="${escapeHtml(entry.node)}" data-node-key="${escapeHtml(entry.key)}" aria-pressed="${!!(current || prepared)}" aria-label="选择 ${escapeHtml(entry.node)}"><span class="node-ico" aria-hidden="true">${escapeHtml(meta.icon)}</span><span class="node-copy"><span class="node-label">${escapeHtml(meta.shortName)}</span><span class="node-source">${escapeHtml((entry.subscriptionNames || [entry.subscriptionName]).join(' / '))}</span></span><span class="node-dot ${dot}" aria-hidden="true"></span></button>
+            <div class="node-measurements"><div><small>HTTPS 延迟</small><span class="network-metric ${network.css}" title="${escapeHtml(network.title)}">${escapeHtml(network.text)}</span></div><div><small>流式 / 下载</small><span class="node-metric ${metricClass}" title="${escapeHtml(codex.title)}">${escapeHtml(metric)}</span></div></div>
+            <div class="node-card-actions"><span class="node-tag ${fastest && !current ? "gold" : ""}">${escapeHtml(tag || '手动选择')}</span><span class="node-group-chip${groupCooldownActive(classifyNodeGroup(entry).id) ? " cooling" : ""}" title="诊断分组 ${escapeHtml(classifyNodeGroup(entry).label)}">${escapeHtml(classifyNodeGroup(entry).id)}</span><button class="node-network" data-network-probe-key="${escapeHtml(entry.key)}" aria-label="检测 ${escapeHtml(entry.node)} 的 HTTPS 延迟" title="测试网络连通性与延迟" ${state.codexProbeRunning || state.networkProbeJob ? "disabled" : ""}>网络</button><button class="node-retest" data-codex-probe-key="${escapeHtml(entry.key)}" aria-label="测试 ${escapeHtml(entry.node)} 的流式与下载质量" title="固定 SSE + 独立 8 MiB 下载，不调用模型" ${state.networkProbeJob || state.codexProbeRunning && state.codexProbeBusyKey !== entry.key ? "disabled" : ""}>质量</button></div>
+          </article>`;
       }).join("");
       return `
         <section class="node-group ${collapsed ? "collapsed" : ""}">
           <header class="node-group-head">
-            <button class="group-caret" data-toggle-group="${escapeHtml(group.id)}" title="${collapsed ? "展开" : "折叠"}">${collapsed ? "▸" : "▾"}</button>
+            <button class="group-caret" data-toggle-group="${escapeHtml(group.id)}" aria-expanded="${!collapsed}" aria-label="${collapsed ? "展开" : "折叠"} ${escapeHtml(group.name)}" title="${collapsed ? "展开" : "折叠"}">${collapsed ? "▸" : "▾"}</button>
             <div class="node-group-title" data-toggle-group="${escapeHtml(group.id)}">
               <strong>${escapeHtml(group.name)}</strong>
               <span>${escapeHtml(statText)}</span>
@@ -5362,6 +5407,8 @@ function switchView(view) {
   if (view === "connections") refreshConnections();
   if (view === "logs") renderLogs();
   if (view === "proxy-nodes") renderProxyNodes();
+  if (view === "home") renderAtelierOverview();
+  document.querySelectorAll('.nav-list .nav').forEach(el => { if (el.dataset.view === view) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current'); });
 }
 
 function renderCustomRules() {
@@ -6024,6 +6071,8 @@ window.SmartProxyLifecycleTest = {
 
 if (window.__SMART_PROXY_TEST__) {
   Object.assign(window.SmartProxyLifecycleTest, {
+    atelierSummary,
+    renderAtelierOverview,
     deleteActiveSubscription,
     downloadSubscription,
     loadMergedCachedSubscriptionPoolForStartup,
