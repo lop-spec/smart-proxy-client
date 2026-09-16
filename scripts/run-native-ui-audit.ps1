@@ -76,7 +76,7 @@ public static class IsolatedNative {
  $job=[IsolatedNative]::OwnedJob()
  if(-not [IsolatedNative]::CreateProcessW($exe,$args,[IntPtr]::Zero,[IntPtr]::Zero,$false,$creationFlags,$envBlock,$stage,[ref]$si,[ref]$pi)){throw ('CreateProcess failed '+[Runtime.InteropServices.Marshal]::GetLastWin32Error())}
  $result.ownedPid=$pi.pid
- if($CaptureControllerFailure){[NativeControllerDiagnostic]::BindOwner($pi.pid);$result.debuggerAttached=$true}
+ if($CaptureControllerFailure){[NativeControllerDiagnostic]::BindOwner($pi.pid);$result.debuggerAttached=$true;Progress 'Controller-only diagnostic: window/layout enumeration is intentionally not performed or accepted'}
  if(-not [IsolatedNative]::AssignProcessToJobObject($job,$pi.process)){[void][IsolatedNative]::TerminateProcess($pi.process,240);throw ('AssignProcessToJobObject failed '+[Runtime.InteropServices.Marshal]::GetLastWin32Error())}
  if([IsolatedNative]::ResumeThread($pi.thread) -eq [uint32]::MaxValue){throw 'ResumeThread failed'}
  Progress ('Owned native process '+$pi.pid+' resumed only in inactive desktop '+$name+'\'+$desktopName)
@@ -84,7 +84,7 @@ public static class IsolatedNative {
  while([IsolatedNative]::WaitForSingleObject($pi.process,0) -ne 0){
   if($result.debuggerAttached){DrainOwnedDebugEvents}
   if($timer.Elapsed.TotalSeconds -gt 150){throw 'Native smoke exceeded 150 seconds'}
-  $windows=[IsolatedNative]::Windows($desktop,$pi.pid);if($windows.Count -gt 0){$result.windows=$windows}
+  $windows=@();if(-not $result.debuggerAttached){$windows=[IsolatedNative]::Windows($desktop,$pi.pid);if($windows.Count -gt 0){$result.windows=$windows}}
   if($timer.Elapsed.TotalSeconds-$lastLog -ge 5){Progress ('elapsed='+[math]::Round($timer.Elapsed.TotalSeconds)+'s ownedProcesses='+[IsolatedNative]::ActiveProcesses($job)+' windows='+$windows.Count);$lastLog=$timer.Elapsed.TotalSeconds}
   Start-Sleep -Milliseconds 200
  }

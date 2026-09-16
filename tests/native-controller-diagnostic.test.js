@@ -6,5 +6,6 @@ test('controller diagnostic verifies exact x64 callback bytes and observes only 
  assert.match(cs,/U32\(context,136\)/);assert.match(cs,/Marshal.ReadInt64\(context,184\)/);assert.match(cs,/Marshal.ReadInt64\(context,248\)/);
  assert.doesNotMatch(cs,/DebugActiveProcess|SetThreadContext|WriteProcessMemory|ReadProcessMemory|MiniDumpWriteDump|AdjustTokenPrivileges/);
  const ps=fs.readFileSync(path.join(__dirname,'../scripts/run-native-ui-audit.ps1'),'utf8');
+ assert.match(ps,/if\(-not \$result\.debuggerAttached\)\{\$windows=\[IsolatedNative\]::Windows/);
  assert.match(ps,/VerifyImage\(\$exe\)/);assert.match(ps,/\$creationFlags=\$creationFlags -bor 2/);assert.match(ps,/diagnosticOnly=\[bool\]\$CaptureControllerFailure/);
 });
