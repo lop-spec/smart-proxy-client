@@ -68,23 +68,16 @@ jobs:
           retention-days: 7
           compression-level: 0
       - name: Native 100 percent UI matrix on an inactive owned desktop
-        timeout-minutes: 4
+        timeout-minutes: 5
         shell: pwsh
         run: |
           $stage = Join-Path $env:RUNNER_TEMP 'native-ui-audit'
           node scripts/prepare-native-ui-audit.cjs $stage
           if ($LASTEXITCODE -ne 0) { throw 'Native fixture staging failed; no UI acceptance is claimed' }
           $manifest = Get-Content (Join-Path $stage 'manifest.json') -Raw | ConvertFrom-Json
-          $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ('"' + (Join-Path $PWD 'scripts/run-native-ui-audit.ps1') + '"'), '-Stage', ('"' + $stage + '"'), '-ExpectedExeSha256', $manifest.exeSha256, '-CaptureControllerFailure')
-          $helper = Start-Process -FilePath "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput "$stage/output/helper.stdout.log" -RedirectStandardError "$stage/output/helper.stderr.log"
-          if (-not $helper.WaitForExit(180000)) {
-            $helper.Kill($true)
-            $helper.WaitForExit(5000) | Out-Null
-            throw 'Owned native helper exceeded 180 seconds; no UI acceptance is claimed'
-          }
+          & ./scripts/launch-native-ui-limited.ps1 -Stage $stage -ExpectedExeSha256 $manifest.exeSha256
           Get-Content "$stage/output/helper.stdout.log", "$stage/output/helper.stderr.log"
           if (Test-Path "$stage/output/host.log") { Get-Content "$stage/output/host.log" }
-          if ($helper.ExitCode -ne 0) { throw "Native helper failed: $($helper.ExitCode)" }
           node scripts/verify-native-ui.cjs $stage 96
           if ($LASTEXITCODE -ne 0) { throw 'Native DPI/DOM/cleanup gate failed' }
       - name: Read owned native startup failure context

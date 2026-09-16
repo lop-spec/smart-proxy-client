@@ -1,4 +1,4 @@
-﻿param([Parameter(Mandatory=$true)][string]$Stage,[Parameter(Mandatory=$true)][ValidatePattern('^[a-f0-9]{64}$')][string]$ExpectedExeSha256,[switch]$CaptureControllerFailure)
+﻿param([Parameter(Mandatory=$true)][string]$Stage,[Parameter(Mandatory=$true)][ValidatePattern('^[a-f0-9]{64}$')][string]$ExpectedExeSha256,[switch]$CaptureControllerFailure,[switch]$RequireNonElevated)
 $ErrorActionPreference='Stop'
 # Legacy PowerShell under CI may lack the Get-FileHash script command. Keep byte-for-byte verification without module-path changes.
 function Sha256([string]$FilePath){$stream=[IO.File]::OpenRead($FilePath);$algorithm=[Security.Cryptography.SHA256]::Create();try{return [BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace('-','').ToLowerInvariant()}finally{$algorithm.Dispose();$stream.Dispose()}}
@@ -17,6 +17,8 @@ $previousDpi=[IntPtr]::Zero;$desktop=[IntPtr]::Zero;$job=[IntPtr]::Zero;$origina
 $result.privateFileGuard='No production state is staged on the hosted runner'
 $result.diagnosticOnly=[bool]$CaptureControllerFailure;$result.debuggerAttached=$false;$result.controllerFailures=@()
 try {
+ $result.helperIsAdministrator=([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+ if($RequireNonElevated -and $result.helperIsAdministrator){throw 'Native helper is elevated; Limited execution precondition failed'}
  Add-Type @'
 using System;using System.Text;using System.Collections.Generic;using System.Runtime.InteropServices;
 public static class IsolatedNative {
