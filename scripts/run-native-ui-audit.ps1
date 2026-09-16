@@ -1,11 +1,13 @@
 ﻿param([Parameter(Mandatory=$true)][string]$Stage,[Parameter(Mandatory=$true)][ValidatePattern('^[a-f0-9]{64}$')][string]$ExpectedExeSha256)
 $ErrorActionPreference='Stop'
+# Legacy PowerShell under CI may lack the Get-FileHash script command. Keep byte-for-byte verification without module-path changes.
+function Sha256([string]$FilePath){$stream=[IO.File]::OpenRead($FilePath);$algorithm=[Security.Cryptography.SHA256]::Create();try{return [BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace('-','').ToLowerInvariant()}finally{$algorithm.Dispose();$stream.Dispose()}}
 if($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows'){throw 'Native CI audit requires a hosted Windows workflow'}
 $stage=[IO.Path]::GetFullPath($Stage);$temp=[IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd([char[]]'\/')+[IO.Path]::DirectorySeparatorChar
 if(-not $stage.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase)){throw 'Only a fresh owned RUNNER_TEMP stage is permitted'}
 if($env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -or $env:WEBVIEW2_BROWSER_EXECUTABLE_FOLDER){throw 'Inherited WebView2 overrides refused'}
 $manifest=Get-Content -LiteralPath (Join-Path $stage 'manifest.json') -Raw -Encoding UTF8|ConvertFrom-Json
-foreach($file in $manifest.files){$p=[IO.Path]::GetFullPath((Join-Path $stage $file.path));if(-not $p.StartsWith($stage+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLowerInvariant() -ne $file.sha256){throw ('Stage identity mismatch: '+$file.path)}}
+foreach($file in $manifest.files){$p=[IO.Path]::GetFullPath((Join-Path $stage $file.path));if(-not $p.StartsWith($stage+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase) -or (Sha256 $p) -ne $file.sha256){throw ('Stage identity mismatch: '+$file.path)}}
 $reportFile=Join-Path $stage 'output/host.json'
 $log=Join-Path $stage 'output/host.log'
 if(Test-Path -LiteralPath $reportFile){throw 'Native report already exists'}
@@ -50,7 +52,7 @@ public static class IsolatedNative {
 '@
  $previousDpi=[IsolatedNative]::SetThreadDpiAwarenessContext([IntPtr](-4));if($previousDpi -eq [IntPtr]::Zero){throw 'Cannot select thread-only per-monitor v2 awareness'}
  $exe=Join-Path $stage 'smart-proxy-audit.exe'
- if((Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant() -ne $ExpectedExeSha256){throw 'Candidate executable identity changed'}
+ if((Sha256 $exe) -ne $ExpectedExeSha256){throw 'Candidate executable identity changed'}
  $original=[IsolatedNative]::GetProcessWindowStation();$result.originalStation=[IsolatedNative]::Name($original)
  $name='WinSta0'
  $desktopName='SmartProxy-Audit-'+[guid]::NewGuid().ToString('N')

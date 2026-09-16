@@ -19,5 +19,6 @@ test('startup graph keeps stream-quality and refuses unexpected loading order',(
 test('native harness has no display switching, forced scaling, sandbox override or production paths',()=>{
  const source=fs.readFileSync(path.join(__dirname,'../scripts/run-native-ui-audit.ps1'),'utf8');
  assert.doesNotMatch(source,/SwitchDesktop\(|SetProcessWindowStation\(|CreateWindowStationW\(|force-device-scale-factor|--no-sandbox|C:\/Users\/lop|Set-ItemProperty/);
+ assert.match(source,/Security\.Cryptography\.SHA256/);assert.doesNotMatch(source,/\(Get-FileHash /);
  assert.match(source,/AssignProcessToJobObject/);assert.match(source,/ActiveProcesses/);assert.match(source,/ExpectedExeSha256/);assert.match(source,/RUNNER_TEMP/);
 });
