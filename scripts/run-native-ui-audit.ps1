@@ -62,7 +62,7 @@ public static class IsolatedNative {
  if($desktop -eq [IntPtr]::Zero){throw ('CreateDesktop failed '+[Runtime.InteropServices.Marshal]::GetLastWin32Error())}
  $result.station=[IsolatedNative]::Name([IsolatedNative]::GetProcessWindowStation());$result.stationVisible=[IsolatedNative]::Visible([IsolatedNative]::GetProcessWindowStation());$result.desktop=[IsolatedNative]::Name($desktop)
  if($result.station -ne $name -or $result.desktop -ne $desktopName){throw 'Isolation precondition failed'}
- $environment=[Environment]::GetEnvironmentVariables();$environment['APPDATA']=Join-Path $stage 'appdata';$environment['LOCALAPPDATA']=Join-Path $stage 'localappdata';$environment['WEBVIEW2_USER_DATA_FOLDER']=Join-Path $stage 'appdata/webview';$environment['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS']='--disable-background-networking';
+ $environment=[Environment]::GetEnvironmentVariables();$environment['APPDATA']=Join-Path $stage 'appdata';$environment['LOCALAPPDATA']=Join-Path $stage 'localappdata';$environment['WEBVIEW2_USER_DATA_FOLDER']=Join-Path $stage 'appdata/webview';$environment['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS']='--disable-background-networking --enable-logging';
  $envText=(($environment.Keys|Sort-Object|ForEach-Object{$_+'='+$environment[$_]}) -join [char]0)+[char]0+[char]0
  $envBlock=[Runtime.InteropServices.Marshal]::StringToHGlobalUni($envText)
  $si=New-Object IsolatedNative+STARTUPINFO;$si.cb=[Runtime.InteropServices.Marshal]::SizeOf($si);$si.desktop=$name+'\'+$desktopName;$si.flags=1;$si.show=4

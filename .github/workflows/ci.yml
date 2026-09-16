@@ -87,6 +87,19 @@ jobs:
           if ($helper.ExitCode -ne 0) { throw "Native helper failed: $($helper.ExitCode)" }
           node scripts/verify-native-ui.cjs $stage 96
           if ($LASTEXITCODE -ne 0) { throw 'Native DPI/DOM/cleanup gate failed' }
+      - name: Read owned native startup failure context
+        if: failure()
+        timeout-minutes: 1
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'native-ui-audit'
+          if (Test-Path "$stage/output/host.json") {
+            & ./scripts/collect-native-startup-context.ps1 -Stage $stage
+            node scripts/collect-native-error-logs.cjs $stage
+            if ($LASTEXITCODE -ne 0) { throw 'Owned native log collection failed' }
+          } else {
+            Write-Warning 'No owned native host report; startup diagnostics are unavailable, not a passing result'
+          }
       - name: Retain native UI output including failures
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
