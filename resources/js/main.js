@@ -218,6 +218,8 @@ const state = {
   mainCoreReady: false,
   mainCoreDesired: false,
   mainStartPromise: null,
+  coreActionPending: "",
+  coreActionError: "",
   mainRestartTimer: null,
   mainHealthFailures: 0,
   mainHealthRecoveryPending: false,
@@ -594,14 +596,16 @@ function atelierSummary(input) {
   const result = current ? input.nodeCodexResults?.get(current.key) : null;
   const valid = result?.metricKind === "stream-quality-v1" && SmartProxyConfig.successfulCodexProbeResult(result);
   const pending = !!current && input.codexProbePendingKeys?.has(current.key);
-  const last = result?.lastAttempt;
+  const last = result?.lastAttempt || (["error", "cancelled"].includes(result?.status) ? result : null);
   const stale = last && last.status !== "done";
   const failedLabel = last?.status === "cancelled" ? "已停止" : "本次未通过";
   const qualityState = pending ? (valid ? "测试中 · 历史" : "测试中") : stale ? (valid ? "历史 · " : "") + failedLabel : valid ? (result.stream.flowPass ? "流式达标" : "存在波动") : "未测试";
-  const qualityMeta = valid ? `${stale || pending ? "上次成功 · " : "最近测于 "}${new Date(result.measuredAt).toLocaleString("zh-CN")} · ${result.verified ? "复测" : "初筛 / 未验证"}` : "当前节点还没有 SSE 成绩";
+  const qualityMeta = valid ? `${stale || pending ? "上次成功 · " : "最近测于 "}${new Date(result.measuredAt).toLocaleString("zh-CN")} · ${result.verified ? "复测" : "初筛 / 未验证"}` : pending ? "正在测试，完成后显示成绩" : stale ? (last.status === "cancelled" ? "测试已停止，可在节点页重新测试" : "未取得有效成绩，请在节点页查看失败原因或重测") : node ? "当前节点还没有 SSE 成绩" : "选择节点后可查看或测试质量";
   const ms = n => typeof n === "number" && Number.isFinite(n) && n >= 0 ? `${Math.round(n)} ms` : "—";
   const network = current ? input.settings.networkProbeStore?.[current.key] : null;
-  const latency = network?.status === "done" ? ms(network.delayMs) : network?.lastSuccess ? `${ms(network.lastSuccess.delayMs)} · 历史` : network?.failureScope === "local" ? "待载入" : network ? "暂无成功成绩" : "未测试";
+  const networkPending = !!current && input.networkPendingKeys?.has(current.key);
+  const previousDelay = network?.status === "done" ? network.delayMs : network?.lastSuccess?.delayMs;
+  const latency = networkPending ? (Number.isFinite(previousDelay) ? `${ms(previousDelay)} · 历史 / 测试中` : "测试中…") : network?.status === "done" ? ms(network.delayMs) : network?.lastSuccess ? `${ms(network.lastSuccess.delayMs)} · 历史` : network?.failureScope === "local" ? "待载入" : network ? "暂无成功成绩" : "未测试";
   const sourceMap = new Map((input.settings.subscriptions || []).map(sub => [sub.id, { name: sub.name || "未命名订阅", count: 0 }]));
   for (const item of entries) {
     const ids = item.subscriptionIds?.length ? item.subscriptionIds : [item.subscriptionId];
@@ -610,11 +614,12 @@ function atelierSummary(input) {
       sourceMap.get(id).count++;
     }
   }
-  return { node: node || "尚未选择节点", region: node ? regions[meta.icon] || "Your connection" : "Your connection", monogram: node ? meta.icon : "SP",
+  return { node: node || "尚未选择节点", hasNode: !!node, region: node ? regions[meta.icon] || "当前线路" : "准备连接", monogram: node ? meta.icon : "SP",
     source: current ? (current.subscriptionNames || [current.subscriptionName]).filter(Boolean).join(" / ") : node ? "已选节点" : "从缓存中选择一条线路",
     jitter: valid && Number.isFinite(result.stream.jitterMs) ? String(Math.round(result.stream.jitterMs)) : "—", latency,
     first: valid ? ms(result.stream.firstSampleMs) : "—", gap: valid ? ms(result.stream.maxExtraGapMs) : "—",
-    qualityState, qualityMeta, sources: [...sourceMap.values()], count: entries.length };
+    qualityState, qualityMeta, qualityTone: pending ? "busy" : stale ? "warning" : valid ? (result.stream.flowPass ? "success" : "warning") : "neutral",
+    sources: [...sourceMap.values()], count: entries.length };
 }
 
 function renderAtelierOverview() {
@@ -626,26 +631,65 @@ function renderAtelierOverview() {
     atelierDetailLatency: view.latency, atelierDetailFirst: view.first, atelierDetailGap: view.gap, atelierDetailHistory: view.qualityMeta };
   for (const [id, value] of Object.entries(values)) if ($(id)) $(id).textContent = value;
   if ($('homeNode')) { $('homeNode').textContent = view.node; $('homeNode').title = view.node; }
+  if ($('atelierSource')) $('atelierSource').title = view.source;
+  if ($('atelierRegion')) $('atelierRegion').classList.toggle('empty-title', !view.hasNode);
+  if ($('atelierQualityState')) $('atelierQualityState').setAttribute('data-tone', view.qualityTone);
+  if ($('homeChooseNode')) {
+    $('homeChooseNode').dataset.view = view.count ? 'proxy-nodes' : 'subscriptions';
+    $('homeChooseNode').innerHTML = `${view.count ? (view.hasNode ? '选择其他节点' : '选择节点') : '添加订阅或导入'} <span aria-hidden="true">→</span>`;
+  }
   if ($('homeMode')) $('homeMode').textContent = state.settings.globalProxyEnabled ? "全局代理" : "自定义规则";
   const sources = $('atelierSources');
   if (sources) sources.innerHTML = view.sources.length ? view.sources.slice(0, 3).map((sub, i) => `<div class="source-item"><span class="source-symbol" aria-hidden="true">${String(i + 1).padStart(2, '0')}</span><div><strong>${escapeHtml(sub.name)}</strong><small>${sub.count} 个缓存节点</small></div></div>`).join('') + (view.sources.length > 3 ? `<small class="more-sources">另有 ${view.sources.length - 3} 个来源</small>` : '') : '<p class="notice">尚未添加订阅<br>也可以导入离线 YAML</p>';
 }
 
+function corePresentation(input) {
+  const on = !!input.mainProcess && !!input.mainCoreReady;
+  const pending = input.coreActionPending || (input.mainStartPromise && !on ? "starting" : "");
+  return { on, busy: !!pending, tone: pending ? "busy" : on ? "on" : "off",
+    title: pending === "stopping" ? "正在停止代理…" : pending ? "正在启动代理…" : on ? "代理运行中" : "代理未启动",
+    action: pending === "stopping" ? "正在停止…" : pending ? "正在启动…" : on ? "停止代理" : "启动代理" };
+}
+
+async function toggleCoreFromUI() {
+  if (state.coreActionPending || state.mainStartPromise) return;
+  state.coreActionPending = state.mainProcess ? "stopping" : "starting";
+  state.coreActionError = "";
+  setStatus();
+  try {
+    if (state.mainProcess) await stopMainCore();
+    else await startMainCore();
+  } catch (err) {
+    state.coreActionError = `操作失败：${err.message || err}。请检查内核与订阅配置，详细原因见运行日志。`;
+    log(`Core toggle failed: ${err.message || err}`);
+  } finally {
+    state.coreActionPending = "";
+    setStatus();
+  }
+}
+
 function setStatus() {
-  const on = !!state.mainProcess && !!state.mainCoreReady;
+  const presentation = corePresentation(state);
+  const { on } = presentation;
   const core = currentCoreLabel();
   const corePath = selectedCorePath();
   const allNodes = state.nodes.length ? state.nodes : getCandidateNodes();
   const routeMode = state.settings.globalProxyEnabled ? "全局代理" : "自定义规则";
   $("sideDot").className = `dot ${on ? "on" : ""}`;
-  $("sideStatus").textContent = on ? "代理运行中" : "未启动";
-  $("hero").className = `hero ${on ? "on" : "off"}`;
-  $("heroTitle").textContent = on ? "代理运行中" : "代理未启动";
-  $("heroTitle").className = `connection-state ${on ? "on" : "off"}`;
+  $("sideStatus").textContent = presentation.title;
+  $("hero").className = `hero ${presentation.tone}`;
+  $("heroTitle").textContent = presentation.title;
+  $("heroTitle").className = `connection-state ${presentation.tone}`;
   $("heroMeta").textContent = on
     ? `${core} / ${routeMode} / 节点 ${allNodes.length}`
     : `当前核心 ${core}${corePath ? " / 路径已设置" : " / 路径未设置"}`;
-  $("toggleCoreBtn").textContent = on ? "停止代理" : "启动代理";
+  $("toggleCoreBtn").textContent = presentation.action;
+  $("toggleCoreBtn").disabled = presentation.busy;
+  $("toggleCoreBtn").setAttribute("aria-busy", String(presentation.busy));
+  if ($("coreActionError")) {
+    $("coreActionError").textContent = state.coreActionError;
+    $("coreActionError").hidden = !state.coreActionError;
+  }
   if ($("homeCore")) $("homeCore").textContent = core;
   if ($("coreBadge")) $("coreBadge").textContent = `${core}${corePath ? " / 路径已设置" : " / 路径未设置"}`;
   $("homeGroup").textContent = state.settings.targetGroup || "-";
@@ -5097,9 +5141,9 @@ async function testNetworkNodes(filter = {}) {
 }
 
 function renderNetworkProbeState(entries) {
-  if ($("testNetworkBtn")) { $("testNetworkBtn").textContent = state.networkProbeJob ? "停止网络测试" : "一键网络测试"; $("testNetworkBtn").disabled = state.codexProbeRunning; }
-  if ($("testAllCodexBtn")) $("testAllCodexBtn").disabled = !!state.networkProbeJob;
-  if ($("networkScoreSummary")) $("networkScoreSummary").textContent = state.networkProgress || `${entries.length} 个缓存节点 · HTTPS 连通与延迟 · 无需模型账户，订阅过期仍可测试`;
+  if ($("testNetworkBtn")) { $("testNetworkBtn").textContent = state.networkProbeJob ? "停止网络测试" : "一键网络测试"; $("testNetworkBtn").disabled = state.codexProbeRunning || (!entries.length && !state.networkProbeJob); }
+  if ($("testAllCodexBtn")) $("testAllCodexBtn").disabled = !!state.networkProbeJob || (!entries.length && !state.codexProbeRunning);
+  if ($("networkScoreSummary")) $("networkScoreSummary").textContent = state.networkProgress || "HTTPS 连通与延迟 · 无需模型账户，订阅过期仍可测试";
 }
 
 function networkMetric(entry) {
@@ -5109,6 +5153,13 @@ function networkMetric(entry) {
   if (r.status === "done") return { text: `${r.delayMs} ms`, title: `HTTPS 连接延迟 · ${new Date(r.measuredAt).toLocaleString()}`, css: "fast" };
   const label = r.status === "cancelled" ? "已停止" : r.failureScope === "local" ? "待载入" : r.failureScope === "round" ? "环境待确认" : "目标未达";
   return { text: label, title: `${r.error || label}${r.lastSuccess ? `；历史 ${r.lastSuccess.delayMs} ms（${new Date(r.lastSuccess.measuredAt).toLocaleString()}）` : ""}`, css: "muted" };
+}
+
+function clearNodeFilter() {
+  if ($("nodeSearch")) $("nodeSearch").value = "";
+  if ($("nodeFilter")) $("nodeFilter").value = "all";
+  renderProxyNodes();
+  $("nodeSearch")?.focus();
 }
 
 function renderProxyNodes() {
@@ -5144,6 +5195,8 @@ function renderProxyNodes() {
   const entries = allEntries.filter(entry => (!query || `${entry.node} ${(entry.subscriptionNames || [entry.subscriptionName]).join(" ")}`.toLowerCase().includes(query))
     && (filter !== "reachable" || state.settings.networkProbeStore?.[entry.key]?.status === "done")
     && (filter !== "current" || (entry.tag || entry.node) === state.currentNode));
+  if ($("nodeListCount")) $("nodeListCount").textContent = query || filter !== "all" ? `显示 ${entries.length} / ${allEntries.length} 个节点` : `${allEntries.length} 个缓存节点`;
+  if ($("clearNodeFilterBtn")) $("clearNodeFilterBtn").hidden = !query && filter === "all";
   const resultOf = (entry) => state.nodeCodexResults.get(entry.key) || null;
 
   const groups = [];
@@ -5165,11 +5218,14 @@ function renderProxyNodes() {
     state.nodeGroupCollapseReady = true;
   }
 
-  const currentEntries = entries.filter(entry => resultOf(entry)?.roundId && resultOf(entry).roundId === state.lastProbeRoundId);
+  const currentEntries = allEntries.filter(entry => resultOf(entry)?.roundId && resultOf(entry).roundId === state.lastProbeRoundId);
   const globalBestEntry = SmartProxyConfig.rankCurrentCodexProbeEntries(currentEntries, state.nodeCodexResults,
     new Map(currentEntries.map(entry => [entry.key, { ok: null }])), new Set(currentEntries.map(entry => entry.key)))[0] || null;
   const globalBestKey = globalBestEntry ? globalBestEntry.key : "";
 
+  const focused = document.activeElement;
+  const focusAttribute = focused && box.contains(focused) && ["data-toggle-group", "data-test-group", "data-network-probe-key", "data-codex-probe-key", "data-node-key"].find(name => focused.hasAttribute(name));
+  const focusValue = focusAttribute ? focused.getAttribute(focusAttribute) : null;
   box.innerHTML = groups.length
     ? groups.map((group) => {
       const sorted = SmartProxyConfig.rankCodexProbeEntries(group.entries, state.nodeCodexResults);
@@ -5220,17 +5276,21 @@ function renderProxyNodes() {
           ${collapsed ? "" : `<div class="node-grid">${rows}</div>`}
         </section>`;
     }).join("")
-    : `<div class="empty-grid">${allEntries.length ? "没有匹配节点，请调整搜索或筛选条件" : "暂无缓存节点 · 请在订阅页添加订阅或导入离线 YAML"}</div>`;
+    : `<div class="empty-grid"><strong>${allEntries.length ? "没有匹配的节点" : "还没有缓存节点"}</strong><p>${allEntries.length ? "试试其他关键词，或清除筛选查看全部节点。" : "添加订阅或导入离线 YAML 后，在这里选择与测试线路。"}</p><button data-node-empty-action="${allEntries.length ? 'clear' : 'subscriptions'}">${allEntries.length ? "清除筛选" : "添加订阅或导入"}</button></div>`;
 
   if ($("testAllCodexBtn")) {
     $("testAllCodexBtn").textContent = state.codexProbeRunning && state.codexProbeMode !== "single" && state.codexProbeMode !== "group"
       ? "停止全测"
       : "质量全测";
   }
-  renderNetworkProbeState(entries);
+  if (focusAttribute) {
+    const replacement = [...box.querySelectorAll(`button[${focusAttribute}]`)].find(button => button.getAttribute(focusAttribute) === focusValue);
+    replacement?.focus({ preventScroll: true });
+  }
+  renderNetworkProbeState(allEntries);
   const summaryBox = $("nodeScoreSummary");
   if (!summaryBox) return;
-  if (!entries.length) {
+  if (!allEntries.length) {
     summaryBox.textContent = "暂无缓存节点";
   }
   else if (state.codexProbeRunning) {
@@ -5240,11 +5300,11 @@ function renderProxyNodes() {
     summaryBox.textContent = `${modeText} ${state.codexProbeCompleted}/${state.codexProbeTotal}${target}`;
   }
   else {
-    const reachableTotal = entries.filter((entry) => {
+    const reachableTotal = allEntries.filter((entry) => {
       const result = resultOf(entry);
       return result?.metricKind === "stream-quality-v1" && result.status === "done" && (!result.lastAttempt || result.lastAttempt.status === "done");
     }).length;
-    const blockedTotal = entries.filter((entry) => {
+    const blockedTotal = allEntries.filter((entry) => {
       const result = resultOf(entry);
       return !!result?.lastAttempt && !["done", "cancelled"].includes(result.lastAttempt.status);
     }).length;
@@ -5254,7 +5314,7 @@ function renderProxyNodes() {
     const bestText = globalBestEntry && globalBestResult
       ? ` · 本轮流式复测达标（并列） ${globalBestEntry.subscriptionName}/${globalBestEntry.node}`
       : "";
-    summaryBox.textContent = `${state.modelProbeNotice}${entries.length} 节点 · 有成绩 ${reachableTotal} · 本次未通过 ${blockedTotal}${bestText}${guardText} · 全测流量上限约 ${(entries.length * (state.settings.streamQualityRounds === 3 ? 3 : 1) * 8.1).toFixed(0)} MiB · 独立核心，不切日常节点`;
+    summaryBox.textContent = `${state.modelProbeNotice}${allEntries.length} 节点 · 有成绩 ${reachableTotal} · 本次未通过 ${blockedTotal}${bestText}${guardText} · 全测流量上限约 ${(allEntries.length * (state.settings.streamQualityRounds === 3 ? 3 : 1) * 8.1).toFixed(0)} MiB · 独立核心，不切日常节点`;
   }
 }
 
@@ -5354,7 +5414,7 @@ function renderConnections() {
   const q = ($("connFilter") && $("connFilter").value.trim().toLowerCase()) || "";
   const all = state.connections || [];
   const conns = (q ? all.filter((c) => connectionSearchText(c).includes(q)) : all).slice(0, 300);
-  $("connSummary").textContent = `${conns.length}/${all.length} active connections`;
+  $("connSummary").textContent = `显示 ${conns.length} / ${all.length} 个活动连接`;
   const html = conns.length ? conns.map((c) => {
     const meta = c.metadata || {};
     const processPath = connectionProcessPath(c);
@@ -5515,6 +5575,7 @@ async function bindEvents() {
   $("testNetworkBtn")?.addEventListener("click", () => testNetworkNodes().catch(showNetworkError));
   $("nodeSearch")?.addEventListener("input", renderProxyNodes);
   $("nodeFilter")?.addEventListener("change", renderProxyNodes);
+  $("clearNodeFilterBtn")?.addEventListener("click", clearNodeFilter);
   $("nodeGroups").addEventListener("keydown", event => {
     if (["Enter", " "].includes(event.key) && event.target.matches("[data-select-node]")) { event.preventDefault(); event.target.click(); }
   });
@@ -5538,19 +5599,14 @@ async function bindEvents() {
       log(`Continuous probe interval set to ${value} min`);
     });
   }
-  $("toggleCoreBtn").addEventListener("click", async () => {
-    try {
-      if (state.mainProcess) await stopMainCore();
-      else await startMainCore();
-    }
-    catch (err) {
-      log(`Core toggle failed: ${err.message || err}`);
-      state.mainProcess = null;
-      state.mainCoreReady = false;
-      setStatus();
-    }
-  });
+  $("toggleCoreBtn").addEventListener("click", toggleCoreFromUI);
   $("nodeGroups").addEventListener("click", (event) => {
+    const emptyAction = event.target.closest("[data-node-empty-action]");
+    if (emptyAction) {
+      if (emptyAction.dataset.nodeEmptyAction === "clear") clearNodeFilter();
+      else switchView("subscriptions");
+      return;
+    }
     const networkButton = event.target.closest("[data-network-probe-key]");
     if (networkButton) { event.stopPropagation(); testNetworkNodes({ key: networkButton.dataset.networkProbeKey }).catch(showNetworkError); return; }
     const probeButton = event.target.closest("[data-codex-probe-key]");
@@ -6072,6 +6128,9 @@ window.SmartProxyLifecycleTest = {
 if (window.__SMART_PROXY_TEST__) {
   Object.assign(window.SmartProxyLifecycleTest, {
     atelierSummary,
+    corePresentation,
+    toggleCoreFromUI,
+    setStatus,
     renderAtelierOverview,
     deleteActiveSubscription,
     downloadSubscription,
