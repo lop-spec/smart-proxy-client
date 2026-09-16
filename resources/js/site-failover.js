@@ -51,7 +51,7 @@
       const result = results instanceof Map ? results.get(entry.key) : results?.[entry.key];
       const streamQuality = result?.metricKind === "stream-quality-v1";
       const metricValid = streamQuality ? result.ok === true && result.stream?.ok === true && result.stream.flowPass === true
-        && result.download?.ok === true && Number.isFinite(result.download.mbps) && result.download.mbps > 0
+        && (result.measurement === "sse-only" || result.download?.ok === true && Number.isFinite(result.download.mbps) && result.download.mbps > 0)
         : result?.tokPerSec > 0 && Number.isFinite(result.tokPerSec) && result.resolvedModelVerified === true
           && !!result.requestedModel && result.requestedModel === result.resolvedModel;
       if (!result || result.status !== "done" || !metricValid

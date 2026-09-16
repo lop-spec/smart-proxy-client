@@ -3,7 +3,7 @@ const MAIN_CONTROLLER_TIMEOUT_MS = 8000;
 const MAIN_CORE_START_ATTEMPTS = 3;
 const MAIN_CORE_RETRY_DELAY_MS = 450;
 const APP_CONFIG_VERSION = 17;
-const APP_BUILD_ID = "2026-09-15-stream-quality-v1.4.0";
+const APP_BUILD_ID = "2026-09-16-parallel-sse-preview";
 const LOG_MAX_FILE_BYTES = 8 * 1024 * 1024;
 const LOG_MAX_BUFFER_BYTES = 256 * 1024;
 const LOG_FLUSH_MS = 500;
@@ -3463,14 +3463,14 @@ async function selectCatalogNode(key, options = {}) {
 }
 
 function nodeCodexPresentation(entry, key) {
-  if (state.codexProbePendingKeys.has(key)) return { text: state.codexProbeCancelRequested ? "停止中" : "测速中", className: "busy", title: "独立通道；固定 SSE + 串行下载；不消耗模型额度；历史保留" };
+  if (state.codexProbePendingKeys.has(key)) return { text: state.codexProbeCancelRequested ? "停止中" : "测速中", className: "busy", title: "独立通道；全节点并行 SSE，不下载测速；不消耗模型额度；历史保留" };
   const stale = entry?.lastAttempt && entry.lastAttempt.status !== "done";
-  if (entry?.metricKind !== "stream-quality-v1" || !entry.download) return { text: stale ? entry.lastAttempt.status === "cancelled" ? "已停止" : "本次未通过" : "未测", className: "muted", title: entry?.lastAttempt?.error || "标准流式质量与下载测速，不代表模型速度" };
+  if (!StreamQuality.isResult(entry)) return { text: stale ? entry.lastAttempt.status === "cancelled" ? "已停止" : "本次未通过" : "未测", className: "muted", title: entry?.lastAttempt?.error || "标准 SSE 网络质量，不代表模型速度" };
   const { stream, download } = entry;
   const quality = `${entry.successfulSamples}/${entry.sampleCount} 次完整成功${entry.verified ? " · 复测" : " · 初筛/未验证"}`;
-  return { text: `${stream.flowPass ? "流稳" : "有波动"} · ${download.mbps.toFixed(1)} Mbps${stale ? " 历史" : ""}`,
+  return { text: `${stream.flowPass ? "流稳" : "有波动"} · 抖动 ${stream.jitterMs.toFixed(0)} ms${stale ? " 历史" : ""}`,
     className: stale ? "muted" : stream.flowPass ? "fast" : "medium",
-    title: `${entry.endpoint} / ${entry.location}；${quality}；首段 ${stream.firstSampleMs.toFixed(0)} ms；抖动 ${stream.jitterMs.toFixed(0)} ms；额外停顿最大 ${stream.maxExtraGapMs.toFixed(0)} ms；攒包 ${(stream.burstRatio * 100).toFixed(1)}%；${download.shortSample ? "下载不足1秒，短样本，不代表带宽上限；" : ""}测于 ${new Date(entry.measuredAt).toLocaleString()}${stale ? `；最新：${entry.lastAttempt.error || entry.lastAttempt.status}` : ""}；不是 tok/s` };
+    title: `${entry.endpoint} / ${entry.location}；${quality}；首段 ${stream.firstSampleMs.toFixed(0)} ms；抖动 ${stream.jitterMs.toFixed(0)} ms；额外停顿最大 ${stream.maxExtraGapMs.toFixed(0)} ms；攒包 ${(stream.burstRatio * 100).toFixed(1)}%；${download ? `历史下载 ${download.mbps.toFixed(1)} Mbps；` : "仅SSE；"}测于 ${new Date(entry.measuredAt).toLocaleString()}${stale ? `；最新：${entry.lastAttempt.error || entry.lastAttempt.status}` : ""}；不是 tok/s` };
 }
 
 
@@ -3996,14 +3996,14 @@ async function runBatchTokProbe(items, options = {}) {
     secret: "unused-isolated-controller", probeLanes: null, logLevel: "error"
   });
   const payload = await SmartProxyStreamQuality.execute({ ns: Neutralino, workDir: state.paths.work, nodePath, scriptPath,
-    job: { endpoint, rounds, corePath: selectedCorePath(), config,
+    job: { endpoint, rounds, includeDownload: false, corePath: selectedCorePath(), config,
       nodes: usable.map(item => ({ key: item.entry.key, tag: item.entry.tag || item.entry.node })) } }, {
     log, onJob: job => { state.probeJob = job; }, isCancelled: () => state.codexProbeCancelRequested,
     onEvent: event => {
       if (event.type === "log") log(`Stream Quality: ${String(event.message || "").slice(0, 500)}`);
       if (event.type === "start") {
         state.lastProbeRoundId = event.roundId || "";
-        log(`Stream Quality ${event.profile}; serial ${rounds} round(s), max ${(event.maxDownloadBytes / 1048576).toFixed(0)} MiB download; isolated core`);
+        log(`Stream Quality ${event.profile}; ${event.concurrency} parallel SSE lanes, ${rounds} round(s), max ${(event.maxSseBytes / 1048576).toFixed(1)} MiB SSE payload; no download; isolated core; 20s full sampling plus connection/cleanup`);
       }
       if (event.type === "progress" && !state.codexProbeCancelRequested) {
         state.codexProbeCompleted = Number(event.completed || 0); state.codexProbeTotal = Number(event.total || usable.length);
@@ -4181,7 +4181,7 @@ async function testCodexNode(key) {
     const result = await runCodexNetworkProbe(entry);
     state.codexProbeCompleted = 1;
     const stored = storeCodexProbeResult(entry, result);
-    const metric = stored.status === "done" && stored.download ? ` ${stored.stream.flowPass ? "流式达标" : "有波动"} / ${stored.download.mbps.toFixed(1)} Mbps` : "";
+    const metric = stored.status === "done" && stored.stream ? ` ${stored.stream.flowPass ? "流式达标" : "有波动"} / 抖动 ${stored.stream.jitterMs.toFixed(1)} ms` : "";
     const detail = result.error ? " - " + result.error : "";
     log("Codex network probe " + result.status + ": " + entry.subscriptionName + "/" + entry.node + metric + detail);
     return stored;
@@ -5047,7 +5047,7 @@ async function testNetworkNodes(filter = {}) {
 }
 
 function renderNetworkProbeState(entries) {
-  if ($("testNetworkBtn")) { $("testNetworkBtn").textContent = state.networkProbeJob ? "停止网络测试" : "一键网络测试"; $("testNetworkBtn").disabled = state.codexProbeRunning; }
+  if ($("testNetworkBtn")) { $("testNetworkBtn").textContent = state.networkProbeJob ? "停止延迟检测" : "仅查 HTTPS 连通延迟"; $("testNetworkBtn").disabled = state.codexProbeRunning; }
   if ($("testAllCodexBtn")) $("testAllCodexBtn").disabled = !!state.networkProbeJob;
   if ($("networkScoreSummary")) $("networkScoreSummary").textContent = state.networkProgress || `${entries.length} 个缓存节点 · HTTPS 连通与延迟 · 无需模型账户，订阅过期仍可测试`;
 }
@@ -5180,7 +5180,7 @@ function renderProxyNodes() {
   if ($("testAllCodexBtn")) {
     $("testAllCodexBtn").textContent = state.codexProbeRunning && state.codexProbeMode !== "single" && state.codexProbeMode !== "group"
       ? "停止全测"
-      : "质量全测";
+      : "一键 SSE 网络测试";
   }
   renderNetworkProbeState(entries);
   const summaryBox = $("nodeScoreSummary");
@@ -5209,7 +5209,7 @@ function renderProxyNodes() {
     const bestText = globalBestEntry && globalBestResult
       ? ` · 本轮流式复测达标（并列） ${globalBestEntry.subscriptionName}/${globalBestEntry.node}`
       : "";
-    summaryBox.textContent = `${state.modelProbeNotice}${entries.length} 节点 · 有成绩 ${reachableTotal} · 本次未通过 ${blockedTotal}${bestText}${guardText} · 全测流量上限约 ${(entries.length * (state.settings.streamQualityRounds === 3 ? 3 : 1) * 8.1).toFixed(0)} MiB · 独立核心，不切日常节点`;
+    summaryBox.textContent = `${state.modelProbeNotice}${entries.length} 节点 · 有成绩 ${reachableTotal} · 本次未通过 ${blockedTotal}${bestText}${guardText} · 全并行 SSE 负载上限约 ${(entries.length * (state.settings.streamQualityRounds === 3 ? 3 : 1) * (StreamQuality.PROFILE.samples * StreamQuality.PROFILE.frameBytes + 4096) / 1048576).toFixed(1)} MiB（不含协议开销）· 不下载测速，不切日常节点`;
   }
 }
 

@@ -62,7 +62,7 @@
           owner.proc = await ns.os.spawnProcess([quote(nodePath), quote(scriptPath), "--job", quote(jobPath)].join(" "), { cwd: workDir });
           early.filter(detail => detail.id === owner.proc.id).forEach(handle);
           if (hooks.isCancelled()) await ns.os.updateSpawnedProcess(owner.proc.id, "stdIn", '{"action":"cancel"}\n');
-          if (!settled) watchdog = setTimeout(() => void terminate("Probe supervisor deadline exceeded"), Math.max(120000, job.nodes.length * job.rounds * 91000 + 20000));
+          if (!settled) watchdog = setTimeout(() => void terminate("Probe supervisor deadline exceeded"), Math.max(120000, (job.includeDownload ? job.nodes.length : 1) * job.rounds * 91000 + 20000));
         })().catch(error => { if (owner.proc) void terminate(error.message); else void finish(error); });
       });
     } finally {

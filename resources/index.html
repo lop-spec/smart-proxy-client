@@ -140,7 +140,7 @@
         </section>
 
         <section id="view-proxy-nodes" class="view">
-          <header class="page-head"><div><span class="eyebrow">ROUTES</span><h1>节点工作台</h1><p>连通延迟、流式质量与下载吞吐分开判断，测试不改变当前连接。</p></div><button id="testNetworkBtn" class="primary">一键网络测试</button></header>
+          <header class="page-head"><div><span class="eyebrow">ROUTES</span><h1>节点工作台</h1><p>一键仅测全节点 SSE 网络质量，测试不改变当前连接。</p></div><button id="testAllCodexBtn" class="primary">一键 SSE 网络测试</button></header>
           <div class="probe-strip panel">
             <p id="networkScoreSummary" role="status">HTTPS 连通与延迟 · 无需模型账户，订阅过期仍可测试</p>
             <div class="toolbar-actions">
@@ -149,17 +149,17 @@
             </div>
           </div>
           <details class="model-options panel" open>
-            <summary>Stream Quality <span>固定 SSE + 独立下载 · 不调用模型 · 全部缓存节点</span></summary>
+            <summary>Stream Quality <span>仅固定 SSE · 全节点并行 · 不调用模型</span></summary>
             <div class="toolbar-actions">
-              <select id="streamQualityRounds" aria-label="测速轮数"><option value="1">1 次初筛 · 每节点最多 8.1 MiB</option><option value="3">3 次交错复测 · 每节点最多 24.3 MiB</option></select>
+              <select id="streamQualityRounds" aria-label="测速轮数"><option value="1">1 轮全并行 SSE · 每节点≤105 KiB</option><option value="3">3 轮复测 · 每轮全并行 · 每节点≤315 KiB</option></select>
               <label class="field">HTTPS 测试端点 <input id="streamQualityEndpoint" type="url" value="https://stream-quality.1781297309.workers.dev" spellcheck="false"></label>
-              <button id="testAllCodexBtn">质量全测</button><button id="phoneQualityBtn">启动手机控制</button>
+              <button id="testNetworkBtn">仅查 HTTPS 连通延迟</button><button id="phoneQualityBtn">启动手机控制</button>
             </div>
-            <p>流式：约 5 KiB/s × 20 秒；下载：8 MiB 串行。独立核心与端口，不切日常节点。同工况流式达标并列；Mbps 不是 tok/s，不代表模型可用性。</p>
+            <p>一键仅测 SSE 网络质量，全部节点同时启动，不下载测速、不调用模型。每轮完整采样20秒，另需连接和收尾；不是点击后20秒内完成。全并发工况可能共享带宽，不能视为各节点独占线路表现。独立核心，不切日常节点。</p>
             <div id="phonePairing" hidden><label class="field">本机执行层 <input id="phoneLocalUrl" readonly></label><label class="field">本次配对码 <input id="phonePairCode" type="password" readonly autocomplete="off"></label><button id="copyPhonePairCode">复制配对码</button><p>手机打开 https://lop-spec.github.io/stream-quality/，填入此电脑的私人 HTTPS 地址与配对码。地址可由 Tailscale Serve 等提供；手机不能使用电脑的 127.0.0.1。手机控制期间暂停本地测速，不影响日常代理。停止控制将取消实际任务、关闭独立核心并使配对码失效。</p></div>
             <p id="nodeScoreSummary" role="status">旧模型成绩原样保留在历史数据中，不参与新榜单。</p>
           </details>
-          <div class="node-column-head"><span>节点 / 订阅</span><span>网络延迟</span><span>流式 / 下载</span><span>手动操作</span></div>
+          <div class="node-column-head"><span>节点 / 订阅</span><span>网络延迟</span><span>SSE 流式质量</span><span>手动操作</span></div>
           <div id="nodeGroups" class="node-groups"></div>
         </section>
 
