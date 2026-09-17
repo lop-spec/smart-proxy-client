@@ -67,7 +67,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
-      - name: Native 100 percent UI matrix on an inactive owned desktop
+      - name: Native startup boundary diagnosis (not UI acceptance)
         timeout-minutes: 5
         shell: pwsh
         run: |
@@ -75,7 +75,7 @@ jobs:
           node scripts/prepare-native-ui-audit.cjs $stage
           if ($LASTEXITCODE -ne 0) { throw 'Native fixture staging failed; no UI acceptance is claimed' }
           $manifest = Get-Content (Join-Path $stage 'manifest.json') -Raw | ConvertFrom-Json
-          & ./scripts/launch-native-ui-limited.ps1 -Stage $stage -ExpectedExeSha256 $manifest.exeSha256
+          & ./scripts/launch-native-ui-limited.ps1 -Stage $stage -ExpectedExeSha256 $manifest.exeSha256 -InspectDesktopSecurity
           Get-Content "$stage/output/helper.stdout.log", "$stage/output/helper.stderr.log"
           if (Test-Path "$stage/output/host.log") { Get-Content "$stage/output/host.log" }
           node scripts/verify-native-ui.cjs $stage 96

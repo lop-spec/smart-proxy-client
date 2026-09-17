@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$Stage,[Parameter(Mandatory=$true)][ValidatePattern('^[a-f0-9]{64}$')][string]$ExpectedExeSha256,[ValidateSet('Launch','Task')][string]$Mode='Launch',[string]$RunnerTemp,[string]$ExpectedSid,[int]$ExpectedSession)
+param([Parameter(Mandatory=$true)][string]$Stage,[Parameter(Mandatory=$true)][ValidatePattern('^[a-f0-9]{64}$')][string]$ExpectedExeSha256,[ValidateSet('Launch','Task')][string]$Mode='Launch',[string]$RunnerTemp,[string]$ExpectedSid,[int]$ExpectedSession,[switch]$InspectDesktopSecurity)
 $ErrorActionPreference='Stop'
 function Json($name,$value){$file=Join-Path $Stage ('output/'+$name);$tmp=$file+'.tmp';[IO.File]::WriteAllText($tmp,($value|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false));[IO.File]::Move($tmp,$file)}
 function HashBytes($bytes){$sha=[Security.Cryptography.SHA256]::Create();try{[BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}}
@@ -9,6 +9,10 @@ if($Mode -eq 'Launch'){
 }
 $Stage=[IO.Path]::GetFullPath($Stage);$prefix=[IO.Path]::GetFullPath($RunnerTemp).TrimEnd([char[]]'\/')+[IO.Path]::DirectorySeparatorChar
 if(-not $Stage.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)){throw 'Owned RUNNER_TEMP stage required'}
+if($InspectDesktopSecurity){
+ & (Join-Path $PSScriptRoot 'read-native-object-security.ps1') -OutputFile (Join-Path $Stage 'output/desktop-security.json')
+ throw 'Read-only startup-boundary diagnosis only; the failed Medium wrapper was not rerun and UI acceptance is not claimed'
+}
 if($Mode -eq 'Task'){
  $record=@{sameUser=($identity.User.Value -eq $ExpectedSid);session=$session;expectedSession=$ExpectedSession;isAdministrator=([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator);wrapperPid=$PID;ok=$false;timedOut=$false;exitCode=1}
  $child=$null
