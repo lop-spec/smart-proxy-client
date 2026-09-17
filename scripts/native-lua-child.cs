@@ -19,14 +19,15 @@ public sealed class NativeLuaChild : IDisposable {
  IntPtr job,desktop;IsolatedNative.PROCESS_INFORMATION process;bool disposed;
  public string desktopName;public uint pid,remaining;public bool parentUnchanged;public Facts before,reduced,after;
  public class Facts {public string sid;public bool administrator;public int elevation,integrityRid,session;}
- static void Check(bool value,string operation){if(!value)throw new Win32Exception(Marshal.GetLastWin32Error(),operation);}
+ static void Check(bool value,string operation){if(!value){int error=Marshal.GetLastWin32Error();throw new Win32Exception(error,operation+" (Win32 "+error+")");}}
  static int Value(IntPtr token,int kind){uint size;GetTokenInformation(token,kind,IntPtr.Zero,0,out size);if(size==0||size>65536)throw new InvalidOperationException("Invalid token data size");var data=Marshal.AllocHGlobal((int)size);try{Check(GetTokenInformation(token,kind,data,size,out size),"Read token");if(kind!=25)return Marshal.ReadInt32(data);var sid=Marshal.ReadIntPtr(data);return Marshal.ReadInt32(GetSidSubAuthority(sid,(uint)(Marshal.ReadByte(GetSidSubAuthorityCount(sid))-1)));}finally{Marshal.FreeHGlobal(data);}}
  static Facts Read(IntPtr token){using(var id=new WindowsIdentity(token)){return new Facts{sid=id.User.Value,administrator=new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator),elevation=Value(token,20),integrityRid=Value(token,25),session=Value(token,12)};}}
  public static NativeLuaChild Start(string app,string args,string directory){
   var child=new NativeLuaChild();IntPtr original=IntPtr.Zero,token=IntPtr.Zero,sid=IntPtr.Zero,descriptor=IntPtr.Zero,security=IntPtr.Zero,environment=IntPtr.Zero;
   try{
    if(IsolatedNative.Name(IsolatedNative.GetProcessWindowStation())!="WinSta0"||Process.GetCurrentProcess().SessionId==0)throw new InvalidOperationException("Existing interactive station required");
-   Check(OpenProcessToken(Process.GetCurrentProcess().Handle,10,out original),"Open caller token");child.before=Read(original);
+   // CreateRestrictedToken returns the same handle rights: QUERY|DUPLICATE|ASSIGN_PRIMARY|ADJUST_DEFAULT are needed for the clone, not changes to the original.
+   Check(OpenProcessToken(Process.GetCurrentProcess().Handle,0x008B,out original),"Open caller token");child.before=Read(original);
    Check(CreateRestrictedToken(original,5,0,IntPtr.Zero,0,IntPtr.Zero,0,IntPtr.Zero,out token),"Create LUA token without sandbox exemptions");
    Check(ConvertStringSidToSidW("S-1-16-8192",out sid),"Medium integrity SID");var label=new SidAttributes{sid=sid,attributes=0x20};
    Check(SetTokenInformation(token,25,ref label,(uint)Marshal.SizeOf(label)+GetLengthSid(sid)),"Lower only cloned token integrity");
@@ -43,7 +44,7 @@ public sealed class NativeLuaChild : IDisposable {
    Check(IsolatedNative.ResumeThread(child.process.thread)!=uint.MaxValue,"Resume owned wrapper");return child;
   }catch{child.Dispose();throw;}finally{if(environment!=IntPtr.Zero)DestroyEnvironmentBlock(environment);if(security!=IntPtr.Zero)Marshal.FreeHGlobal(security);if(descriptor!=IntPtr.Zero)LocalFree(descriptor);if(sid!=IntPtr.Zero)LocalFree(sid);if(token!=IntPtr.Zero)IsolatedNative.CloseHandle(token);if(original!=IntPtr.Zero)IsolatedNative.CloseHandle(original);}
  }
- public bool Exited(){return IsolatedNative.WaitForSingleObject(process.process,0)==0;}
+ public bool Exited(){uint result=IsolatedNative.WaitForSingleObject(process.process,0);Check(result!=uint.MaxValue,"Wait for owned wrapper");return result==0;}
  public uint ExitCode(){uint code;Check(IsolatedNative.GetExitCodeProcess(process.process,out code),"Read owned wrapper exit");return code;}
  public void Dispose(){if(disposed)return;disposed=true;try{if(job!=IntPtr.Zero){Check(IsolatedNative.TerminateJobObject(job,240),"Stop owned wrapper job");for(int i=0;i<50&&IsolatedNative.ActiveProcesses(job)>0;i++)System.Threading.Thread.Sleep(100);remaining=IsolatedNative.ActiveProcesses(job);}}finally{if(job!=IntPtr.Zero)IsolatedNative.CloseHandle(job);if(process.thread!=IntPtr.Zero)IsolatedNative.CloseHandle(process.thread);if(process.process!=IntPtr.Zero)IsolatedNative.CloseHandle(process.process);if(desktop!=IntPtr.Zero)IsolatedNative.CloseDesktop(desktop);}}
 }
