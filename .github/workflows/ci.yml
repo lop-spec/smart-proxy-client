@@ -67,19 +67,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
-      - name: Native startup boundary diagnosis (not UI acceptance)
-        timeout-minutes: 5
+      - name: Native DPI acceptance pending - hosted startup path paused
         shell: pwsh
         run: |
-          $stage = Join-Path $env:RUNNER_TEMP 'native-ui-audit'
-          node scripts/prepare-native-ui-audit.cjs $stage
-          if ($LASTEXITCODE -ne 0) { throw 'Native fixture staging failed; no UI acceptance is claimed' }
-          $manifest = Get-Content (Join-Path $stage 'manifest.json') -Raw | ConvertFrom-Json
-          & ./scripts/launch-native-ui-limited.ps1 -Stage $stage -ExpectedExeSha256 $manifest.exeSha256 -InspectDesktopSecurity
-          Get-Content "$stage/output/helper.stdout.log", "$stage/output/helper.stderr.log"
-          if (Test-Path "$stage/output/host.log") { Get-Content "$stage/output/host.log" }
-          node scripts/verify-native-ui.cjs $stage 96
-          if ($LASTEXITCODE -ne 0) { throw 'Native DPI/DOM/cleanup gate failed' }
+          Write-Warning 'Hosted WebView2 startup experiments are paused. No token, SDDL or native UI launch is retried. Existing diagnostic artifacts remain retained.'
+          throw 'Native DPI acceptance is NOT passed: only the separate real-desktop 125% result is accepted; 100/150/175% remain pending.'
       - name: Read owned native startup failure context
         if: failure()
         timeout-minutes: 1
