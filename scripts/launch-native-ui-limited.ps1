@@ -27,8 +27,28 @@ if($Mode -eq 'Task'){
 }
 if($ExpectedSid.EndsWith('-500')){
  Write-Warning 'Built-in Administrator ignores Task Scheduler Limited run level; the known-failing task path will not be repeated'
- & (Join-Path $PSScriptRoot 'read-native-lua-token.ps1') -OutputFile (Join-Path $Stage 'output/lua-token-capability.json')
- throw 'Built-in Administrator: capability recorded only; no native UI acceptance or launch attempted'
+ Add-Type -Path @((Join-Path $PSScriptRoot 'native-ui-interop.cs'),(Join-Path $PSScriptRoot 'native-lua-child.cs'))
+ $child=$null;$record=@{mode='same-user-medium-token';nativeAcceptance=$false;systemSettingsChanged=$false;sharedDesktopAclChanged=$false;ok=$false}
+ try{
+  $arguments='-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "'+$PSCommandPath+'" -Mode Task -Stage "'+$Stage+'" -ExpectedExeSha256 '+$ExpectedExeSha256+' -RunnerTemp "'+$RunnerTemp+'" -ExpectedSid '+$ExpectedSid+' -ExpectedSession '+$ExpectedSession
+  $child=[NativeLuaChild]::Start("$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe",$arguments,$Stage)
+  $record.pid=$child.pid;$record.desktop=$child.desktopName;$record.before=$child.before;$record.reduced=$child.reduced;$record.after=$child.after;$record.parentUnchanged=$child.parentUnchanged
+  Json 'lua-launch-start.json' $record
+  $timer=[Diagnostics.Stopwatch]::StartNew();$lastLog=-10
+  while(-not $child.Exited()){
+   if($timer.Elapsed.TotalSeconds -gt 210){throw 'Owned Medium wrapper exceeded 210 seconds'}
+   if($timer.Elapsed.TotalSeconds-$lastLog -ge 10){Write-Output ('Owned Medium wrapper '+$child.pid+': elapsed='+[math]::Round($timer.Elapsed.TotalSeconds)+'s');$lastLog=$timer.Elapsed.TotalSeconds}
+   Start-Sleep -Milliseconds 500
+  }
+  $record.exitCode=$child.ExitCode()
+  if($record.exitCode -ne 0){throw ('Owned Medium wrapper failed: 0x'+$record.exitCode.ToString('X8'))}
+  $record.ok=$true
+ }catch{$record.error=$_.Exception.Message;Write-Warning $record.error}finally{
+  if($child){$child.Dispose();$record.ownedProcessesRemaining=$child.remaining;if($child.remaining -ne 0){$record.ok=$false;$record.error='Owned Medium wrapper cleanup failed'}}
+  Json 'lua-launch.json' $record
+ }
+ if(-not $record.ok){throw $record.error}
+ return
 }
 $service=New-Object -ComObject Schedule.Service;$service.Connect();$folder=$service.GetFolder('\')
 $name='SmartProxy-Native-'+[guid]::NewGuid().ToString('N');$registered=$null;$export=$null
