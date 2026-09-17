@@ -20,6 +20,30 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Read native display capability (not UI acceptance)
+        timeout-minutes: 1
+        shell: pwsh
+        run: |
+          $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ('"' + (Join-Path $PWD 'scripts/read-native-display-capability.ps1') + '"'), '-OutputPath', ('"' + (Join-Path $PWD 'native-display-capability.json') + '"'))
+          $probe = Start-Process -FilePath "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput native-display-capability.log -RedirectStandardError native-display-capability.stderr.log
+          if (-not $probe.WaitForExit(45000)) {
+            $probe.Kill($true)
+            $probe.WaitForExit(5000) | Out-Null
+            throw 'Owned capability probe exceeded 45 seconds; no UI acceptance is claimed'
+          }
+          Get-Content native-display-capability.log, native-display-capability.stderr.log
+          if ($probe.ExitCode -ne 0) { throw "Capability collection failed: $($probe.ExitCode)" }
+      - name: Retain native display capability
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-display-capability-${{ github.sha }}
+          path: |
+            native-display-capability.json
+            native-display-capability.log
+            native-display-capability.stderr.log
+          if-no-files-found: error
+          retention-days: 7
       - name: Set up Node.js
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
@@ -43,3 +67,29 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+      - name: Native DPI acceptance pending - hosted startup path paused
+        shell: pwsh
+        run: |
+          Write-Warning 'Hosted WebView2 startup experiments are paused. No token, SDDL or native UI launch is retried. Existing diagnostic artifacts remain retained.'
+          throw 'Native DPI acceptance is NOT passed: only the separate real-desktop 125% result is accepted; 100/150/175% remain pending.'
+      - name: Read owned native startup failure context
+        if: failure()
+        timeout-minutes: 1
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'native-ui-audit'
+          if (Test-Path "$stage/output/host.json") {
+            & ./scripts/collect-native-startup-context.ps1 -Stage $stage
+            node scripts/collect-native-error-logs.cjs $stage
+            if ($LASTEXITCODE -ne 0) { throw 'Owned native log collection failed' }
+          } else {
+            Write-Warning 'No owned native host report; startup diagnostics are unavailable, not a passing result'
+          }
+      - name: Retain native UI output including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-ui-100-${{ github.sha }}
+          path: ${{ runner.temp }}/native-ui-audit/output/
+          if-no-files-found: warn
+          retention-days: 7
