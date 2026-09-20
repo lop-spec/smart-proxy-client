@@ -19,7 +19,7 @@ function app() {
     setInterval: fn => { timers.set(++nextTimer, fn); return nextTimer; }, clearInterval: id => timers.delete(id),
     SmartProxyConfig: { ...helpers }, StreamQuality: require('../resources/scripts/stream-quality.js'),
     SmartProxyStreamQuality: require('../resources/js/stream-quality-job.js'), Neutralino: { filesystem: {}, os: {} },
-    document: { hidden: false, getElementById(id) { if (!elements.has(id)) elements.set(id, { value: "", innerHTML: "", textContent: "", classList: { toggle() {} } }); return elements.get(id); } }
+    document: { hidden: false, getElementById(id) { if (!elements.has(id)) elements.set(id, { value: "", innerHTML: "", textContent: "", dataset: {}, setAttribute() {}, classList: { toggle() {} } }); return elements.get(id); } }
   });
   vm.runInContext(source, context);
   return { context, elements, timers, run: code => vm.runInContext(code, context) };

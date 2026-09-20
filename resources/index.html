@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Smart Proxy Client</title>
     <link rel="icon" href="/icons/appIcon.png">
-    <link rel="stylesheet" href="/styles.css?v=2026-09-16-atelier-1">
+    <link rel="stylesheet" href="/styles.css?v=2026-09-16-atelier-2">
   </head>
   <body>
     <a class="skip-link" href="#main-content">跳到主内容</a>
@@ -46,17 +46,18 @@
           <div id="hero" class="hero off">
             <div class="hero-copy">
               <span class="eyebrow">当前选择</span>
-              <h2 id="atelierRegion" class="region-title">Your connection</h2>
+              <h2 id="atelierRegion" class="region-title">准备连接</h2>
               <div class="hero-node-line"><b id="homeNode">尚未选择节点</b><span id="atelierSource">从缓存中选择一条线路</span></div>
               <div class="hero-context"><span id="homeMode" class="panel-badge">手动选点</span><p id="heroMeta">选择配置后启动主核心</p></div>
-              <div class="hero-actions"><button id="toggleCoreBtn" class="primary">启动代理</button><button class="nav text-action" data-view="proxy-nodes">选择其他节点 <span aria-hidden="true">→</span></button></div>
+              <div class="hero-actions"><button id="toggleCoreBtn" class="primary" aria-describedby="heroMeta">启动代理</button><button id="homeChooseNode" class="nav text-action" data-view="proxy-nodes">选择节点 <span aria-hidden="true">→</span></button></div>
+              <p id="coreActionError" class="inline-error" role="alert" hidden></p>
             </div>
-            <div class="route-sculpture" aria-hidden="true"><svg viewBox="0 0 340 340"><circle cx="170" cy="170" r="160" class="globe-wash"/><g class="globe-lines"><circle cx="170" cy="170" r="126"/><ellipse cx="170" cy="170" rx="76" ry="126"/><ellipse cx="170" cy="170" rx="126" ry="48"/><path d="M44 170h252M170 44v252"/></g><circle cx="170" cy="170" r="68" class="globe-center"/><circle cx="284" cy="116" r="8" class="globe-pin"/><text id="atelierMonogram" x="170" y="190" text-anchor="middle">SP</text></svg><div class="hero-latency"><span>最近 HTTPS 延迟</span><strong id="atelierLatency">—</strong></div></div>
+            <div class="route-sculpture"><svg viewBox="0 0 340 340" aria-hidden="true"><circle cx="170" cy="170" r="160" class="globe-wash"/><g class="globe-lines"><circle cx="170" cy="170" r="126"/><ellipse cx="170" cy="170" rx="76" ry="126"/><ellipse cx="170" cy="170" rx="126" ry="48"/><path d="M44 170h252M170 44v252"/></g><circle cx="170" cy="170" r="68" class="globe-center"/><circle cx="284" cy="116" r="8" class="globe-pin"/><text id="atelierMonogram" x="170" y="190" text-anchor="middle">SP</text></svg><div class="hero-latency"><span>最近 HTTPS 延迟</span><strong id="atelierLatency">—</strong></div></div>
           </div>
 
           <div class="atelier-dashboard">
             <section class="panel quality-tile">
-              <div class="panel-head"><h2>流式抖动</h2><span id="atelierQualityState" class="panel-badge">未测试</span></div>
+              <div class="panel-head"><h2>流式抖动</h2><span id="atelierQualityState" class="panel-badge" role="status">未测试</span></div>
               <div class="quality-value"><strong id="atelierJitter">—</strong><span id="atelierJitterUnit">ms</span></div>
               <p id="atelierQualityMeta">当前节点还没有 SSE 成绩</p>
               <button class="nav text-action" data-view="proxy-nodes">查看质量测试 <span aria-hidden="true">→</span></button>
@@ -127,13 +128,15 @@
         <section id="view-proxy-nodes" class="view">
           <header class="page-head"><div><span class="eyebrow">ROUTES</span><h1>节点工作台</h1><p>连通延迟、流式质量与下载吞吐分开判断，测试不改变当前连接。</p></div><button id="testNetworkBtn" class="primary">一键网络测试</button></header>
           <div class="probe-strip panel">
-            <p id="networkScoreSummary" role="status">HTTPS 连通与延迟 · 无需模型账户，订阅过期仍可测试</p>
+            <div class="node-list-status"><strong id="nodeListCount" role="status">缓存节点</strong><p id="networkScoreSummary" role="status">HTTPS 连通与延迟 · 无需模型账户，订阅过期仍可测试</p></div>
             <div class="toolbar-actions">
               <label class="sr-only" for="nodeSearch">搜索节点或订阅</label><input id="nodeSearch" class="filter-input" placeholder="搜索节点或订阅…">
               <select id="nodeFilter" aria-label="筛选节点"><option value="all">全部节点</option><option value="reachable">网络可达</option><option value="current">当前节点</option></select>
+              <button id="clearNodeFilterBtn" class="mini" hidden>清除筛选</button>
             </div>
           </div>
           <div class="atelier-node-workspace">
+          <div id="nodeGroups" class="node-groups" aria-label="缓存节点列表"></div>
           <details class="model-options panel" open>
             <summary>质量测试 <span>Stream Quality / SSE + 下载</span></summary>
             <div class="atelier-current-detail"><span>当前选择</span><strong id="atelierDetailNode">尚未选择节点</strong><dl><div><dt>HTTPS 延迟</dt><dd id="atelierDetailLatency">—</dd></div><div><dt>首段等待</dt><dd id="atelierDetailFirst">—</dd></div><div><dt>额外停顿</dt><dd id="atelierDetailGap">—</dd></div></dl><small id="atelierDetailHistory">当前节点还没有 SSE 成绩</small></div>
@@ -146,7 +149,6 @@
             <div id="phonePairing" hidden><label class="field">本机执行层 <input id="phoneLocalUrl" readonly></label><label class="field">本次配对码 <input id="phonePairCode" type="password" readonly autocomplete="off"></label><button id="copyPhonePairCode">复制配对码</button><p>手机打开 https://lop-spec.github.io/stream-quality/，填入此电脑的私人 HTTPS 地址与配对码。地址可由 Tailscale Serve 等提供；手机不能使用电脑的 127.0.0.1。手机控制期间暂停本地测速，不影响日常代理。停止控制将取消实际任务、关闭独立核心并使配对码失效。</p></div>
             <p id="nodeScoreSummary" role="status">旧模型成绩原样保留在历史数据中，不参与新榜单。</p>
           </details>
-          <div id="nodeGroups" class="node-groups" aria-label="缓存节点列表"></div>
           </div>
         </section>
 
@@ -164,7 +166,7 @@
         <section id="view-connections" class="view">
           <div class="toolbar">
             <div>
-              <h2>连接</h2>
+              <h1>活动连接</h1>
               <span id="connSummary">连接记录来自主核心控制器</span>
             </div>
             <div class="toolbar-actions">
@@ -176,12 +178,12 @@
             <table>
               <thead>
                 <tr>
-                  <th>Host</th>
-                  <th>Rule</th>
-                  <th>Chain</th>
-                  <th>Process</th>
-                  <th>Up</th>
-                  <th>Down</th>
+                  <th>目标地址</th>
+                  <th>命中规则</th>
+                  <th>连接链路</th>
+                  <th>进程</th>
+                  <th>上传</th>
+                  <th>下载</th>
                 </tr>
               </thead>
               <tbody id="connRows"></tbody>
@@ -192,8 +194,8 @@
         <section id="view-logs" class="view">
           <div class="toolbar">
             <div>
-              <h2>日志</h2>
-              <span>客户端、核心、连接记录</span>
+              <h1>运行日志</h1>
+              <span>客户端、核心与连接记录</span>
             </div>
             <div class="toolbar-actions">
               <label class="sr-only" for="logFilter">过滤日志</label><input id="logFilter" class="filter-input" placeholder="过滤日志关键字">
@@ -289,7 +291,7 @@
             <section class="settings-section span">
               <div class="section-title"><h2>自定义规则</h2></div>
               <div class="rule-controls">
-                <select id="customRuleType">
+                <select id="customRuleType" aria-label="规则类型">
                   <option value="DOMAIN-SUFFIX-SET">域名后缀集合</option>
                   <option value="DOMAIN-SUFFIX">域名后缀</option>
                   <option value="DOMAIN-KEYWORD">域名关键字</option>
@@ -299,13 +301,13 @@
                   <option value="PROCESS-NAME-REGEX">EXE 正则</option>
                   <option value="PROCESS-PATH-REGEX">路径正则</option>
                 </select>
-                <input id="customRuleValue" placeholder="github.com 或 parsec">
-                <select id="customRuleOutbound">
+                <input id="customRuleValue" aria-label="规则内容" placeholder="github.com 或 parsec">
+                <select id="customRuleOutbound" aria-label="规则策略">
                   <option value="SMART">目标组</option>
                   <option value="DIRECT">DIRECT</option>
                   <option value="REJECT">REJECT</option>
                 </select>
-                <select id="customRulePosition">
+                <select id="customRulePosition" aria-label="规则位置">
                   <option value="prepend">前置</option>
                   <option value="append">后置</option>
                 </select>
@@ -333,7 +335,7 @@
                 <label class="check-row"><input id="autoStartSilent" type="checkbox" checked> 开机自动静默启动</label>
                 <label class="check-row continuous-probe-row">
                   <input id="continuousWssAutoSwitchEnabled" type="checkbox">
-                  <span title="按上次榜单顺序循环更新 tok/s；持续测速只更新榜单，不切换节点。"><b>持续测速（不切节点）</b><small>仅更新成绩，所有测速均不自动切节点</small></span>
+                  <span title="循环更新 SSE 流式质量与下载吞吐成绩；不调用模型，不切换节点。"><b>持续测速（不切节点）</b><small>仅更新成绩，所有测速均不自动切节点</small></span>
                 </label>
                 <label class="check-row probe-interval-row" title="每轮全量测速结束后等待的时间；0 = 不间歇连续测。修改即时生效。">
                   <span><b>测速间隔（分钟）</b><small>0 = 连续</small></span>
